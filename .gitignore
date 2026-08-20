@@ -1,0 +1,75 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.test-tmp/
+.benchmark-tmp/
+.mypy_cache/
+.ruff_cache/
+.pip-tmp/
+pytest-cache-files*/
+.cache/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+config/config.local.yaml
+config/*.local.*
+# DPAPI ciphertext sidecar created by the Windows camera editor.
+config/config.local.secrets.json
+
+# Runtime data and downloaded models
+database/*
+!database/.gitkeep
+persons/*
+!persons/.gitkeep
+events/*
+!events/.gitkeep
+snapshots/*
+!snapshots/.gitkeep
+recordings/*
+!recordings/.gitkeep
+logs/*
+!logs/.gitkeep
+models/*
+!models/.gitkeep
+# Ultralytics creates its local settings directory when a model is loaded.
+Ultralytics/
+enrollment/*
+!enrollment/.gitkeep
+
+# Generated media and reports
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.mkv
+*.avi
+*.jsonl
+*.log
+
+# Android / Gradle
+app_android/.gradle-user-home/
+app_android/.android-user-home/
+app_android/.gradle/
+app_android/.kotlin/
+app_android/build/
+app_android/app/build/
+app_android/local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+# Keep Gradle wrapper – do not ignore
+!gradle/wrapper/gradle-wrapper.jar
+!app_android/gradle/wrapper/gradle-wrapper.jar
+
+# WPF / .NET / IDE
+app_windows_wpf/bin/
+app_windows_wpf/obj/
+.vs/
+*.user
+*.suo

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mistral-inspired operator palette: warm neutrals, restrained orange action. -->
+    <color name="localcam_shell">#1F1F1F</color>
+    <color name="localcam_surface">#2C2C2C</color>
+    <color name="localcam_surface_elevated">#3A302B</color>
+    <color name="localcam_surface_subtle">#332D29</color>
+    <color name="localcam_border">#6A6A6A</color>
+    <color name="localcam_border_subtle">#4A4A4A</color>
+    <color name="localcam_cream">#FFF8E0</color>
+    <color name="localcam_cream_light">#FFFAEB</color>
+    <color name="localcam_beige">#E6D5A8</color>
+    <color name="localcam_text_primary">#FFFAEB</color>
+    <color name="localcam_text_secondary">#E6D5A8</color>
+    <color name="localcam_text_muted">#A8A8A8</color>
+    <color name="localcam_text_on_action">#FFFFFF</color>
+    <color name="localcam_action">#FA520F</color>
+    <color name="localcam_action_deep">#CC3A05</color>
+    <color name="localcam_green">#4FBF83</color>
+    <color name="localcam_amber">#FFB83E</color>
+    <color name="localcam_red">#DF5D54</color>
+    <color name="localcam_scrim">#B8000000</color>
+</resources>

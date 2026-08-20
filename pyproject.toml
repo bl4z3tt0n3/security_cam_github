@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-security-cam"
+version = "0.1.0"
+description = "Local-first video stream diagnostics for a low-cost security camera prototype"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "numpy>=2.0,<3",
+    "opencv-python>=4.10,<5",
+    "PyYAML>=6.0,<7",
+    "pydantic>=2.8,<3",
+    "psutil>=6.0,<8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0,<9",
+]
+windows = [
+    "PySide6>=6.7,<7",
+    "pytest-qt>=4.4,<5",
+]
+person-detection = [
+    "ultralytics>=8.4.120,<8.5",
+    "onnxruntime>=1.20,<2",
+]
+yoloe = [
+    "ultralytics>=8.4.0,<9",
+]
+openvino = [
+    "openvino>=2024.0,<2027",
+]
+face-embedding = [
+    "onnxruntime>=1.20,<2",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*", "scripts*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "app_windows/tests"]
+addopts = "-ra -p no:cacheprovider"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

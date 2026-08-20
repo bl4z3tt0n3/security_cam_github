@@ -1,0 +1,145 @@
+# Configurazione di esempio. Copiala in config/config.local.yaml per uso locale.
+# Il file locale è ignorato da Git.
+
+cameras:
+  - id: huawei_p30
+    name: "Huawei P30 Pro"
+    enabled: true
+    source_type: opencv
+    stream_url: "${CAMERA_HUAWEI_URL}"
+  - id: cam_2
+    name: "Camera 2"
+    enabled: false
+    source_type: opencv
+    stream_url: "${CAMERA_CAM_2_URL}"
+  - id: cam_3
+    name: "Camera 3"
+    enabled: false
+    source_type: opencv
+    stream_url: "${CAMERA_CAM_3_URL}"
+  - id: cam_4
+    name: "Camera 4"
+    enabled: false
+    source_type: opencv
+    stream_url: "${CAMERA_CAM_4_URL}"
+  - id: cam_5
+    name: "Camera 5"
+    enabled: false
+    source_type: opencv
+    stream_url: "${CAMERA_CAM_5_URL}"
+  - id: cam_6
+    name: "Camera 6"
+    enabled: false
+    source_type: opencv
+    stream_url: "${CAMERA_CAM_6_URL}"
+
+video:
+  open_timeout_seconds: 5
+  read_timeout_seconds: 3
+  rtsp_transport: tcp
+  reconnect_delay_seconds: 2
+  # 0 = retry illimitati; un valore positivo limita i tentativi per outage.
+  max_reconnect_attempts: 0
+  max_buffer_frames: 1
+  backend: auto
+
+inference:
+  person_detection_fps: 2
+
+# Queste sezioni sono predisposte per le fasi successive e restano inattive.
+person_detection:
+  enabled: false
+  # Candidate Intel profile. The section remains disabled until the optional
+  # openvino extra and a verified device are installed.
+  backend: "openvino"
+  model: "models/yolo26s.pt"
+  prompts:
+    - "person"
+  classes:
+    - "person"
+  confidence_threshold: 0.45
+  precision: fp16
+  device: gpu
+  fallback_device: cpu
+  image_size: 640
+
+# Tracking leggero per ogni camera. Gli ID sono temporanei e locali alla pipeline.
+tracking:
+  iou_threshold: 0.30
+  max_center_distance_px: 100
+  max_missed_samples: 3
+
+# Optional low-cost frame-difference gate. Disabled preserves baseline behavior.
+motion_detection:
+  enabled: false
+  pixel_threshold: 25
+  min_changed_fraction: 0.01
+  resize_width: 320
+  warmup_frames: 1
+
+face_detection:
+  enabled: false
+  detector_id: scrfd_2.5g_kps
+  backend: auto
+  model: "models/face_detection/scrfd_2.5g_kps/scrfd_2.5g_bnkps.onnx"
+  confidence_threshold: 0.5
+  nms_threshold: 0.4
+  inference_fps: 2
+  device: auto
+
+face_landmarks:
+  enabled: false
+  landmarker_id: landmarks-regression-retail-0009
+  backend: openvino
+  model: "models/face_landmarks/landmarks-regression-retail-0009/landmarks-regression-retail-0009.xml"
+  device: auto
+
+face_quality:
+  min_width: 80
+  min_height: 80
+  blur_threshold: 40
+  min_brightness: 30
+  max_brightness: 225
+  min_confidence: 0.5
+
+recognition:
+  enabled: false
+  recognizer_id: face-reidentification-retail-0095
+  backend: auto
+  model: "models/face_embedding/face-reidentification-retail-0095/face-reidentification-retail-0095.xml"
+  model_version: "1"
+  device: auto
+  # Cosine similarity: values closer to 1 are more similar.
+  # Keep null until a threshold has been calibrated; no identity is confirmed.
+  threshold: null
+  min_confirmations: 2
+  confirmation_window_seconds: 10
+  inference_fps: 1
+
+events:
+  # Event metadata is always local; snapshots are stored below events/ per event.
+  save_snapshot: true
+  known_person_cooldown_seconds: 30
+  unknown_person_cooldown_seconds: 15
+
+recording:
+  # The future recording backend is deliberately not started by default.
+  enabled: false
+
+storage:
+  database_dir: database
+  persons_dir: persons
+  enrollment_dir: enrollment
+  events_dir: events
+  snapshots_dir: snapshots
+  recordings_dir: recordings
+  logs_dir: logs
+  models_dir: models
+
+logging:
+  level: INFO
+
+windows_ui:
+  display_fps: 15
+  start_maximized: true
+  remember_window_geometry: true

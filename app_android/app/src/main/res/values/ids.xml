@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Stable resource IDs retained for automation and the SurfaceView bridge during the Compose migration. -->
+    <item name="localcam_root" type="id" />
+    <item name="camera_preview" type="id" />
+    <item name="header_overlay" type="id" />
+    <item name="localcam_title" type="id" />
+    <item name="header_chip_group" type="id" />
+    <item name="header_status_chip" type="id" />
+    <item name="camera_selector" type="id" />
+    <item name="preview_status_badge" type="id" />
+    <item name="control_panel" type="id" />
+    <item name="panel_handle" type="id" />
+    <item name="stream_action_button" type="id" />
+    <item name="panel_expanded_content" type="id" />
+    <item name="preview_action" type="id" />
+    <item name="setup_action" type="id" />
+    <item name="diagnostics_action" type="id" />
+    <item name="panel_info_text" type="id" />
+    <item name="collapsed_stream_action" type="id" />
+    <item name="placeholder_scrim" type="id" />
+    <item name="placeholder_sheet" type="id" />
+    <item name="placeholder_handle" type="id" />
+    <item name="placeholder_title" type="id" />
+    <item name="placeholder_message" type="id" />
+    <item name="placeholder_content" type="id" />
+    <item name="placeholder_close_button" type="id" />
+</resources>

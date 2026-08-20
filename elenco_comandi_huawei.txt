@@ -1,0 +1,15 @@
+cd "$env:LOCALAPPDATA\Android\Sdk\platform-tools"
+.\adb.exe kill-server
+.\adb.exe start-server
+.\adb.exe devices -l
+
+.\adb.exe -s 22X7N19504004174 tcpip 5555
+
+.\adb.exe -s 22X7N19504004174 shell ip route
+
+.\adb.exe disconnect
+.\adb.exe connect 192.168.X.Y:5555
+
+.\adb.exe devices -l
+
+.\adb.exe devices -l
