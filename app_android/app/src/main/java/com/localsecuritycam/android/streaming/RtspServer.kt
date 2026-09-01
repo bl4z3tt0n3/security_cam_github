@@ -216,6 +216,13 @@ class RtspServer(
             bindAddress: InetAddress,
             credentials: RtspCredentials?,
         ): StreamFailure? {
+            if (!bindAddress.isLoopbackAddress && !settings.authEnabled) {
+                return StreamErrorFormatter.fromMessage(
+                    StreamErrorKind.CONFIGURATION,
+                    "Basic authentication is required for a non-loopback RTSP listener",
+                    retryable = false,
+                )
+            }
             if (settings.authEnabled && credentials?.enabled != true) {
                 return StreamErrorFormatter.fromMessage(
                     StreamErrorKind.CONFIGURATION,
