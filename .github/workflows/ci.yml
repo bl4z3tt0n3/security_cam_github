@@ -79,6 +79,8 @@ jobs:
         run: ./gradlew test
       - name: Android lint
         run: ./gradlew lint
+      - name: Release build with R8
+        run: ./gradlew assembleRelease
 
   wpf:
     name: WPF build
