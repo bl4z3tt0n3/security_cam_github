@@ -138,6 +138,25 @@ def _hardware_acceleration_value(name: str) -> int | None:
     return values.get(name)
 
 
+def _capture_hardware_acceleration_name(capture: Any) -> str:
+    if cv2 is None:
+        return "unknown"
+    prop = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
+    if prop is None:
+        return "unknown"
+    try:
+        actual = int(round(float(capture.get(prop))))
+    except (AttributeError, TypeError, ValueError, cv2.error):
+        return "unknown"
+    names = {
+        getattr(cv2, "VIDEO_ACCELERATION_NONE", -1000): "none",
+        getattr(cv2, "VIDEO_ACCELERATION_ANY", -1001): "auto",
+        getattr(cv2, "VIDEO_ACCELERATION_D3D11", -1002): "d3d11",
+        getattr(cv2, "VIDEO_ACCELERATION_MFX", -1003): "mfx",
+    }
+    return names.get(actual, f"value:{actual}")
+
+
 def _default_capture_factory(
     url: str,
     backend: str,
@@ -218,6 +237,7 @@ class OpenCVVideoSource(VideoSource):
         self._read_timeout_s = read_timeout_s
         self._max_buffer_frames = max_buffer_frames
         self._hardware_acceleration = normalized_hw
+        self._hardware_acceleration_used = "unknown"
         self._capture_factory = (
             capture_factory
             if capture_factory is not None
@@ -266,6 +286,11 @@ class OpenCVVideoSource(VideoSource):
         return self._hardware_acceleration
 
     @property
+    def hardware_acceleration_used(self) -> str:
+        with self._state_lock:
+            return self._hardware_acceleration_used
+
+    @property
     def is_connected(self) -> bool:
         with self._state_lock:
             return self._connected
@@ -297,6 +322,7 @@ class OpenCVVideoSource(VideoSource):
                     code="unreachable",
                 )
             self._configure_capture(capture)
+            actual_hw = _capture_hardware_acceleration_name(capture)
             info = self._read_stream_info(capture)
         except VideoSourceError:
             self._safe_release(capture)
@@ -329,6 +355,7 @@ class OpenCVVideoSource(VideoSource):
                 stale = False
                 self._capture = capture
                 self._info = info
+                self._hardware_acceleration_used = actual_hw
                 self._connected = True
                 self._startup_deadline_monotonic = time.monotonic() + max(
                     _STARTUP_GRACE_MIN_S,
@@ -366,6 +393,8 @@ class OpenCVVideoSource(VideoSource):
             "source_open_success",
             generation=generation,
             startup_grace=f"{max(_STARTUP_GRACE_MIN_S, self._read_timeout_s * 2.0):.2f}s",
+            hardware_acceleration_requested=self._hardware_acceleration,
+            hardware_acceleration_used=self._hardware_acceleration_used,
         )
         return info
 
