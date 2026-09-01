@@ -753,14 +753,16 @@ class BridgeRuntime(QObject):
             self._last_preview_publish[camera_id] = now
             return True
         previous = self._last_preview_publish.get(camera_id, 0.0)
-        if now - previous < 0.2:  # 5 FPS is enough for small grid tiles.
+        background_fps = max(0.1, float(self._config.windows_ui.background_preview_fps))
+        if now - previous < 1.0 / background_fps:
             return False
         self._last_preview_publish[camera_id] = now
         return True
 
     @staticmethod
-    def _thumbnail_frame(frame: Any, max_width: int = 480) -> Any:
+    def _thumbnail_frame(self, frame: Any) -> Any:
         image = np.asarray(frame)
+        max_width = int(self._config.windows_ui.background_preview_max_width)
         if image.ndim != 3 or image.shape[1] <= max_width:
             return image
         try:
