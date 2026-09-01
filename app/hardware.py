@@ -129,10 +129,12 @@ def apply_hardware_profile(config: Any) -> Any:
         person.image_size = adaptive.image_size
         person.openvino_performance_mode = adaptive.performance_mode
         person.openvino_num_streams = (
-            hardware.gpu_streams if hardware.gpu_streams > 0 else adaptive.num_streams
+            min(hardware.gpu_streams, adaptive.num_streams)
+            if hardware.gpu_streams > 0
+            else adaptive.num_streams
         )
         person.openvino_num_requests = (
-            hardware.gpu_num_requests
+            min(hardware.gpu_num_requests, adaptive.num_requests)
             if hardware.gpu_num_requests > 0
             else adaptive.num_requests
         )
