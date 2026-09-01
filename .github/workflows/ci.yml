@@ -78,4 +78,4 @@ jobs:
           dotnet-version: "8.0.x"
       - name: Build WPF frontend
         shell: pwsh
-        run: dotnet build app_windows_wpf/LocalSecurityMonitor.Wpf.csproj --configuration Release --no-restore
+        run: dotnet build app_windows_wpf/LocalSecurityMonitor.Wpf.csproj --configuration Release
