@@ -67,18 +67,27 @@ class StaticProvider:
         return self.packet
 
 
-def _person_snapshot(camera_id: str) -> PersonDetectionSnapshot:
-    pipeline = CameraTrackingPipeline(camera_id)
-    detection = PersonDetection(
-        bbox=(10.0, 10.0, 120.0, 110.0),
-        confidence=0.95,
-        timestamp=datetime.now(timezone.utc),
-    )
-    update = pipeline.update((detection,))
+def _person_snapshot(
+    camera_id: str,
+    *,
+    pipeline: CameraTrackingPipeline | None = None,
+    person: bool = True,
+) -> PersonDetectionSnapshot:
+    pipeline = pipeline or CameraTrackingPipeline(camera_id)
+    if person:
+        detection = PersonDetection(
+            bbox=(10.0, 10.0, 120.0, 110.0),
+            confidence=0.95,
+            timestamp=datetime.now(timezone.utc),
+        )
+        detections = (detection,)
+    else:
+        detections = ()
+    update = pipeline.update(detections)
     return PersonDetectionSnapshot(
         camera_id=camera_id,
-        person_count=1,
-        detections=(detection,),
+        person_count=len(detections),
+        detections=detections,
         tracking_update=update,
         tracking_pipeline=pipeline,
     )
@@ -137,8 +146,10 @@ def test_face_fleet_shares_one_detector_across_person_cameras(monkeypatch, tmp_p
             "cam_2": StaticProvider("cam_2", 1),
         }
     )
-    controller.set_person_snapshot(_person_snapshot("cam_1"))
-    controller.set_person_snapshot(_person_snapshot("cam_2"))
+    cam_1_pipeline = CameraTrackingPipeline("cam_1")
+    cam_2_pipeline = CameraTrackingPipeline("cam_2")
+    controller.set_person_snapshot(_person_snapshot("cam_1", pipeline=cam_1_pipeline))
+    controller.set_person_snapshot(_person_snapshot("cam_2", pipeline=cam_2_pipeline))
     controller.set_active_camera("cam_1", None)
     controller.start()
     try:
@@ -155,6 +166,17 @@ def test_face_fleet_shares_one_detector_across_person_cameras(monkeypatch, tmp_p
         assert detector.calls == 2
         assert controller.snapshots["cam_1"].face_count == 1
         assert controller.snapshots["cam_2"].face_count == 1
+
+        controller.set_person_snapshot(
+            _person_snapshot("cam_1", pipeline=cam_1_pipeline, person=False)
+        )
+        assert _wait_until(
+            lambda: (
+                controller.snapshots["cam_1"].status
+                is FaceRecognitionStatus.READY
+                and controller.snapshots["cam_1"].face_count == 0
+            )
+        )
     finally:
         controller.stop(timeout_s=1.0)
 
