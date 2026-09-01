@@ -272,6 +272,19 @@ class OpenVINOPersonDetector(PersonDetector):
     def device_verified(self) -> bool:
         return self._device_verified
 
+    @property
+    def supports_batch_inference(self) -> bool:
+        return (
+            self._device_family(self._target_device) == "GPU"
+            and max(self._num_streams, self._num_requests) > 1
+        )
+
+    @property
+    def preferred_batch_size(self) -> int:
+        if not self.supports_batch_inference:
+            return 1
+        return max(2, min(4, self._num_requests or self._num_streams or 2))
+
     def detect(
         self,
         frame: np.ndarray,
@@ -293,6 +306,52 @@ class OpenVINOPersonDetector(PersonDetector):
             detection_timestamp,
             self._confidence_threshold,
         )
+
+    def detect_batch(
+        self,
+        frames: list[np.ndarray],
+        timestamps: list[datetime | None] | None = None,
+    ) -> list[list[PersonDetection]]:
+        if not frames:
+            return []
+        if timestamps is None:
+            timestamps = [None] * len(frames)
+        if len(frames) != len(timestamps):
+            raise ValueError("frames and timestamps must have the same length")
+        if len(frames) == 1 or self._device_family(self._target_device) != "GPU":
+            return [
+                self.detect(frame, timestamp)
+                for frame, timestamp in zip(frames, timestamps, strict=True)
+            ]
+
+        images = [self._validate_frame(frame) for frame in frames]
+        detection_timestamps = [
+            self._validate_timestamp(timestamp) for timestamp in timestamps
+        ]
+        try:
+            results = list(self._predict_batch(images))
+        except Exception as exc:
+            raise PersonDetectionError(
+                f"OpenVINO batched inference failed on {self._target_device}: {exc}"
+            ) from exc
+        if len(results) != len(images):
+            raise PersonDetectionError(
+                f"OpenVINO returned {len(results)} batch results for {len(images)} frames"
+            )
+        return [
+            self._extract_detections(
+                [result],
+                image.shape[:2],
+                timestamp,
+                self._confidence_threshold,
+            )
+            for result, image, timestamp in zip(
+                results,
+                images,
+                detection_timestamps,
+                strict=True,
+            )
+        ]
 
     def close(self) -> None:
         self._model = None
@@ -606,41 +665,96 @@ class OpenVINOPersonDetector(PersonDetector):
         self._actual_execution_devices = ()
         return model
 
+    def _predict_call(self, model: Any, source: Any, *, batch_size: int = 1) -> Any:
+        predict = getattr(model, "predict", None)
+        if not callable(predict):
+            raise PersonDetectionError("OpenVINO model does not expose predict()")
+        kwargs: dict[str, Any] = {
+            "source": source,
+            "conf": self._confidence_threshold,
+            "imgsz": self._image_size,
+            "device": f"intel:{self._target_device}",
+            "classes": [0],
+            "stream": False,
+            "verbose": False,
+            "save": False,
+        }
+        if batch_size > 1:
+            kwargs["batch"] = batch_size
+        return predict(**kwargs)
+
+    def _verify_runtime_device(self, model: Any) -> None:
+        if self._device_verified:
+            return
+        execution_devices = self._read_execution_devices(model)
+        self._verify_execution_devices(execution_devices)
+        self._actual_execution_devices = tuple(execution_devices)
+        matching = next(
+            (
+                device
+                for device in execution_devices
+                if self._device_family(device) == self._device_family(self._target_device)
+            ),
+            execution_devices[0],
+        )
+        self._device_used = matching
+        self._device_verified = True
+
     def _predict(self, image: np.ndarray) -> Any:
         device_fallback_attempted = False
         precision_fallback_attempted = False
         while True:
             model = self._model or self._load_runtime_model()
             try:
-                predict = getattr(model, "predict", None)
-                if not callable(predict):
-                    raise PersonDetectionError("OpenVINO model does not expose predict()")
-                results = predict(
-                    source=image,
-                    conf=self._confidence_threshold,
-                    imgsz=self._image_size,
-                    device=f"intel:{self._target_device}",
-                    classes=[0],
-                    stream=False,
-                    verbose=False,
-                    save=False,
-                )
+                results = self._predict_call(model, image)
                 if not self._runtime_tuned:
                     self._retune_ultralytics_openvino(model)
-                if not self._device_verified:
-                    execution_devices = self._read_execution_devices(model)
-                    self._verify_execution_devices(execution_devices)
-                    self._actual_execution_devices = tuple(execution_devices)
-                    matching = next(
-                        (
-                            device
-                            for device in execution_devices
-                            if self._device_family(device) == self._device_family(self._target_device)
-                        ),
-                        execution_devices[0],
-                    )
-                    self._device_used = matching
-                    self._device_verified = True
+                self._verify_runtime_device(model)
+                return results
+            except Exception as exc:
+                self._model = None
+                if (
+                    self._device_family(self._target_device) == "GPU"
+                    and self._fallback_device == "cpu"
+                    and not device_fallback_attempted
+                ):
+                    device_fallback_attempted = True
+                    self._fallback_to_cpu(str(exc))
+                    continue
+                if (
+                    self._device_family(self._target_device) == "CPU"
+                    and self._precision_used == "fp16"
+                    and not precision_fallback_attempted
+                    and self._source_checkpoint is not None
+                ):
+                    precision_fallback_attempted = True
+                    self._fallback_to_fp32(str(exc))
+                    continue
+                raise PersonDetectionError(str(exc)) from exc
+
+    def _predict_batch(self, images: list[np.ndarray]) -> Any:
+        device_fallback_attempted = False
+        precision_fallback_attempted = False
+        while True:
+            model = self._model or self._load_runtime_model()
+            try:
+                # Ultralytics creates its OpenVINO backend lazily on the first
+                # predict call. Initialize it with one frame, then replace the
+                # compiled model before the real multi-frame batch.
+                if not self._runtime_tuned:
+                    self._predict_call(model, images[0])
+                    self._retune_ultralytics_openvino(model)
+                if self._device_family(self._target_device) != "GPU":
+                    return [
+                        self._predict(image)
+                        for image in images
+                    ]
+                results = self._predict_call(
+                    model,
+                    images,
+                    batch_size=len(images),
+                )
+                self._verify_runtime_device(model)
                 return results
             except Exception as exc:
                 self._model = None
@@ -666,7 +780,13 @@ class OpenVINOPersonDetector(PersonDetector):
     def _tuning_config(self) -> dict[str, Any]:
         target_family = self._device_family(self._target_device)
         config: dict[str, Any] = {}
-        if self._num_streams > 0:
+        if target_family == "CPU":
+            # Current Ultralytics/OpenVINO async CPU batching has documented
+            # hard-hang cases. Keep fallback CPU synchronous and bounded.
+            config["PERFORMANCE_HINT"] = "LATENCY"
+            config["INFERENCE_NUM_THREADS"] = resolve_cpu_thread_budget(self._cpu_threads)
+            config["ENABLE_CPU_PINNING"] = False
+        elif self._num_streams > 0:
             # OpenVINO treats explicit NUM_STREAMS as the low-level alternative
             # to PERFORMANCE_HINT. Avoid specifying both simultaneously.
             config["NUM_STREAMS"] = self._num_streams
@@ -674,9 +794,6 @@ class OpenVINOPersonDetector(PersonDetector):
             config["PERFORMANCE_HINT"] = self._performance_mode.upper()
             if self._num_requests > 0:
                 config["PERFORMANCE_HINT_NUM_REQUESTS"] = self._num_requests
-        if target_family == "CPU":
-            config["INFERENCE_NUM_THREADS"] = resolve_cpu_thread_budget(self._cpu_threads)
-            config["ENABLE_CPU_PINNING"] = False
         return config
 
     def _retune_ultralytics_openvino(self, model: Any) -> None:
@@ -718,7 +835,10 @@ class OpenVINOPersonDetector(PersonDetector):
                 pass
             owner.inference_mode = (
                 "THROUGHPUT"
-                if self._performance_mode == "throughput" or self._num_streams > 1
+                if (
+                    self._device_family(self._target_device) == "GPU"
+                    and (self._performance_mode == "throughput" or self._num_streams > 1)
+                )
                 else "LATENCY"
             )
             # Keep any future static-shape recompilation on the same policy.
