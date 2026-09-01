@@ -178,3 +178,35 @@ def test_fake_provider_can_simulate_reconnect_without_losing_worker_contract() -
         assert provider.snapshot().worker.thread_alive is True
     finally:
         provider.stop(timeout_s=1.0)
+
+def test_backend_provider_shares_cached_latest_frame_between_consumers(monkeypatch) -> None:
+    source = FakeVideoSource([], fps=30.0)
+    provider = BackendFrameProvider(
+        "shared-latest",
+        source,
+        read_timeout_s=0.05,
+        reconnect_delay_s=0.0,
+        max_reconnect_attempts=1,
+        max_buffer_frames=1,
+        stop_timeout_s=1.0,
+    )
+    packet = FramePacket(
+        frame=np.zeros((4, 4, 3), dtype=np.uint8),
+        sequence=7,
+        received_at_utc=utc_now(),
+        received_monotonic=time.monotonic(),
+        read_duration_ms=0.1,
+    )
+    values = iter((packet, None))
+    monkeypatch.setattr(
+        provider.worker,
+        "get_latest",
+        lambda timeout_s=0.0: next(values),
+    )
+
+    first_consumer = provider.latest_frame()
+    second_consumer = provider.latest_frame()
+
+    assert first_consumer is packet
+    assert second_consumer is packet
+
