@@ -556,6 +556,9 @@ class OpenVINOPersonDetector(PersonDetector):
                 f"OpenVINO IR must expose task=detect, got task={task}"
             )
         self._model = model
+        # A freshly loaded/compiled model must prove its execution device once.
+        self._device_verified = False
+        self._actual_execution_devices = ()
         return model
 
     def _predict(self, image: np.ndarray) -> Any:
@@ -577,19 +580,20 @@ class OpenVINOPersonDetector(PersonDetector):
                     verbose=False,
                     save=False,
                 )
-                execution_devices = self._read_execution_devices(model)
-                self._verify_execution_devices(execution_devices)
-                self._actual_execution_devices = tuple(execution_devices)
-                matching = next(
-                    (
-                        device
-                        for device in execution_devices
-                        if self._device_family(device) == self._device_family(self._target_device)
-                    ),
-                    execution_devices[0],
-                )
-                self._device_used = matching
-                self._device_verified = True
+                if not self._device_verified:
+                    execution_devices = self._read_execution_devices(model)
+                    self._verify_execution_devices(execution_devices)
+                    self._actual_execution_devices = tuple(execution_devices)
+                    matching = next(
+                        (
+                            device
+                            for device in execution_devices
+                            if self._device_family(device) == self._device_family(self._target_device)
+                        ),
+                        execution_devices[0],
+                    )
+                    self._device_used = matching
+                    self._device_verified = True
                 return results
             except Exception as exc:
                 self._model = None
@@ -688,9 +692,13 @@ class OpenVINOPersonDetector(PersonDetector):
             raise PersonDetectionError("person detection frame must have shape HxWx3")
         if image.shape[0] < 1 or image.shape[1] < 1:
             raise PersonDetectionError("person detection frame cannot be empty")
-        if not np.issubdtype(image.dtype, np.number):
-            raise PersonDetectionError("person detection frame must contain numeric pixels")
-        if not bool(np.isfinite(image).all()):
+        if not np.issubdtype(image.dtype, np.number) or np.issubdtype(
+            image.dtype, np.complexfloating
+        ):
+            raise PersonDetectionError("person detection frame must contain real numeric pixels")
+        # Integer pixels are finite by construction; scanning an entire uint8
+        # frame before each inference is unnecessary work.
+        if np.issubdtype(image.dtype, np.floating) and not bool(np.isfinite(image).all()):
             raise PersonDetectionError("person detection frame must contain finite pixels")
         return image if image.dtype == np.uint8 else np.clip(image, 0, 255).astype(np.uint8)
 
