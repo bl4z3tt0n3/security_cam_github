@@ -103,6 +103,34 @@ class PersonDetector(ABC):
 
         return False
 
+    @property
+    def supports_batch_inference(self) -> bool:
+        """Whether detect_batch() is implemented as one backend batch."""
+
+        return False
+
+    @property
+    def preferred_batch_size(self) -> int:
+        """Maximum useful batch size for the configured backend policy."""
+
+        return 1
+
+    def detect_batch(
+        self,
+        frames: list[np.ndarray],
+        timestamps: list[datetime | None] | None = None,
+    ) -> list[list[PersonDetection]]:
+        """Fallback batch contract preserving the single-frame API."""
+
+        if timestamps is None:
+            timestamps = [None] * len(frames)
+        if len(frames) != len(timestamps):
+            raise ValueError("frames and timestamps must have the same length")
+        return [
+            self.detect(frame, timestamp)
+            for frame, timestamp in zip(frames, timestamps, strict=True)
+        ]
+
     def close(self) -> None:
         """Release optional model resources."""
 
