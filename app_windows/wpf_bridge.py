@@ -399,7 +399,8 @@ class BridgeRuntime(QObject):
         )
 
     def _set_person_detection(self, data: dict[str, Any]) -> None:
-        prompts_value = data.get("prompts", ["person"])
+        current = self._person_controller.settings
+        prompts_value = data.get("prompts", current.prompts)
         if isinstance(prompts_value, str):
             prompts = tuple(value.strip() for value in prompts_value.split(",") if value.strip())
         elif isinstance(prompts_value, (list, tuple)):
@@ -421,7 +422,22 @@ class BridgeRuntime(QObject):
             device=str(data.get("device") or "auto").strip().lower(),
             precision=str(data.get("precision") or "fp16").strip().lower(),
             fallback_device=str(data.get("fallback_device") or "none").strip().lower(),
-            image_size=int(data.get("image_size", 640)),
+            image_size=int(data.get("image_size", current.image_size)),
+            openvino_performance_mode=str(
+                data.get("openvino_performance_mode", current.openvino_performance_mode)
+            ).strip().lower(),
+            openvino_num_streams=int(
+                data.get("openvino_num_streams", current.openvino_num_streams)
+            ),
+            openvino_num_requests=int(
+                data.get("openvino_num_requests", current.openvino_num_requests)
+            ),
+            openvino_cpu_threads=int(
+                data.get("openvino_cpu_threads", current.openvino_cpu_threads)
+            ),
+            max_process_ram_mb=int(
+                data.get("max_process_ram_mb", current.max_process_ram_mb)
+            ),
             classes=prompts,
             prompts=prompts,
             show_boxes=bool(data.get("show_boxes", True)),
@@ -642,6 +658,11 @@ class BridgeRuntime(QObject):
             "precision": settings.precision,
             "fallback_device": settings.fallback_device,
             "image_size": settings.image_size,
+            "openvino_performance_mode": settings.openvino_performance_mode,
+            "openvino_num_streams": settings.openvino_num_streams,
+            "openvino_num_requests": settings.openvino_num_requests,
+            "openvino_cpu_threads": settings.openvino_cpu_threads,
+            "max_process_ram_mb": settings.max_process_ram_mb,
             "classes": list(settings.classes),
             "prompts": list(settings.prompts),
             "show_boxes": settings.show_boxes,
