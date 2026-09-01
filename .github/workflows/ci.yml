@@ -26,6 +26,8 @@ jobs:
         run: ruff check --select E9,F63,F7,F82 app app_windows scripts tests
       - name: Pytest
         run: pytest
+      - name: Scalability smoke benchmark
+        run: python scripts/benchmark_scalability.py --mode fake --max-cameras 4 --duration 0.2 --warmup 0 --scenario one_person --parallel-inference 2 --fake-inference-ms 1 --json > scalability-smoke.json
 
   python-windows:
     name: Windows bridge contract
