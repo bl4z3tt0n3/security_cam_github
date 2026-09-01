@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - new
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python tests and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project
+        run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,windows]"
+      - name: Ruff
+        run: ruff check app app_windows scripts tests
+      - name: Pytest
+        run: pytest
+
+  python-windows:
+    name: Windows bridge contract
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install project
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,windows]"
+      - name: Test WPF bridge transport
+        shell: pwsh
+        run: pytest app_windows/tests/test_wpf_bridge_contract.py -q
+
+  android:
+    name: Android tests and lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app_android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+      - uses: android-actions/setup-android@v3
+      - name: Install Android SDK 35
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Make Gradle wrapper executable
+        run: chmod +x gradlew
+      - name: Unit tests
+        run: ./gradlew test
+      - name: Android lint
+        run: ./gradlew lint
+
+  wpf:
+    name: WPF build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Build WPF frontend
+        shell: pwsh
+        run: dotnet build app_windows_wpf/LocalSecurityMonitor.Wpf.csproj --configuration Release --no-restore
