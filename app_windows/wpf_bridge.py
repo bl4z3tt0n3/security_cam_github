@@ -10,9 +10,6 @@ WPF process over redirected standard streams.
 from __future__ import annotations
 
 import argparse
-import mmap
-import os
-import struct
 from dataclasses import replace
 import json
 import logging
@@ -68,120 +65,11 @@ from app_windows.models.face_recognition_state import (
     FaceRecognitionSnapshot,
 )
 from app_windows.monitor_controller import CameraMonitorController
+from app_windows.shared_preview import SharedFramePublisher
 from app_windows.video.fake_provider import fake_connection_source_factory
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-
-_FRAME_MAGIC = b"LSCF"
-_FRAME_VERSION = 1
-_FRAME_HEADER = struct.Struct("<4sIQQIIII")
-
-
-class SharedFramePublisher:
-    """Publish latest BGR frames through a Windows named memory mapping.
-
-    JSON carries only the mapping name and geometry.  A monotonically
-    increasing write epoch in the fixed header lets the WPF reader detect and
-    retry a frame that was overwritten while it was copying the pixel bytes.
-    """
-
-    def __init__(self, camera_id: str) -> None:
-        if os.name != "nt":
-            raise RuntimeError("WPF shared preview transport is available on Windows only")
-        safe_id = "".join(ch if ch.isalnum() else "_" for ch in camera_id) or "camera"
-        self._prefix = f"LocalSecurityCamPreview_{os.getpid()}_{safe_id}"
-        self._generation = 0
-        self._mapping: mmap.mmap | None = None
-        self._mapping_name: str | None = None
-        self._capacity = 0
-        self._epoch = 0
-
-    def close(self) -> None:
-        mapping = self._mapping
-        self._mapping = None
-        self._mapping_name = None
-        self._capacity = 0
-        if mapping is not None:
-            mapping.close()
-
-    def _ensure_mapping(self, required_bytes: int) -> None:
-        total = _FRAME_HEADER.size + required_bytes
-        if self._mapping is not None and self._capacity >= total:
-            return
-        old = self._mapping
-        self._generation += 1
-        self._mapping_name = f"{self._prefix}_{self._generation}"
-        self._mapping = mmap.mmap(
-            -1,
-            total,
-            tagname=self._mapping_name,
-            access=mmap.ACCESS_WRITE,
-        )
-        self._capacity = total
-        if old is not None:
-            old.close()
-
-    def publish(self, sequence: int, frame: Any) -> dict[str, Any]:
-        image = np.asarray(frame)
-        if (
-            image.ndim != 3
-            or image.shape[2] != 3
-            or image.shape[0] <= 0
-            or image.shape[1] <= 0
-        ):
-            raise ValueError("preview frame must be a non-empty HxWx3 BGR image")
-        if image.dtype != np.uint8:
-            image = np.clip(image, 0, 255).astype(np.uint8)
-        if not image.flags.c_contiguous:
-            image = np.ascontiguousarray(image)
-
-        height, width = int(image.shape[0]), int(image.shape[1])
-        stride = int(image.strides[0])
-        byte_count = stride * height
-        self._ensure_mapping(byte_count)
-        mapping = self._mapping
-        name = self._mapping_name
-        assert mapping is not None and name is not None
-
-        self._epoch += 1
-        if self._epoch % 2 == 0:
-            self._epoch += 1
-        writing_epoch = self._epoch
-        _FRAME_HEADER.pack_into(
-            mapping,
-            0,
-            _FRAME_MAGIC,
-            _FRAME_VERSION,
-            writing_epoch,
-            int(sequence),
-            width,
-            height,
-            stride,
-            byte_count,
-        )
-        mapping.seek(_FRAME_HEADER.size)
-        mapping.write(memoryview(image).cast("B"))
-        self._epoch += 1
-        _FRAME_HEADER.pack_into(
-            mapping,
-            0,
-            _FRAME_MAGIC,
-            _FRAME_VERSION,
-            self._epoch,
-            int(sequence),
-            width,
-            height,
-            stride,
-            byte_count,
-        )
-        return {
-            "frame_shm_name": name,
-            "frame_byte_count": byte_count,
-            "frame_stride": stride,
-            "frame_width": width,
-            "frame_height": height,
-        }
 
 
 def build_parser() -> argparse.ArgumentParser:
