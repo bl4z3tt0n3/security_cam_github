@@ -274,3 +274,36 @@ def test_openvino_runtime_gpu_failure_retries_on_cpu_and_verifies_cpu(tmp_path: 
     assert detector.device_verified is True
     assert detector.fallback_reason == "synthetic GPU compile failure"
     assert len(created) == 2
+
+def test_openvino_execution_device_is_verified_once_per_loaded_model(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "models" / "yolo26s.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"checkpoint")
+    cache = checkpoint.with_name("yolo26s_openvino_model")
+    _write_valid_cache(cache)
+    created: list[object] = []
+    reads = 0
+
+    def execution_devices(_model: object) -> tuple[str, ...]:
+        nonlocal reads
+        reads += 1
+        return ("GPU.0",)
+
+    detector = OpenVINOPersonDetector(
+        checkpoint,
+        confidence_threshold=0.45,
+        device="gpu",
+        model_root=tmp_path,
+        core_factory=FakeCore,
+        yolo_factory=_factory_for(cache, created),
+        execution_devices_reader=execution_devices,
+    )
+    frame = np.zeros((10, 12, 3), dtype=np.uint8)
+
+    detector.detect(frame)
+    detector.detect(frame)
+
+    assert reads == 1
+    assert detector.device_verified is True
+    runtime = next(item for item in created if isinstance(item, FakeRuntimeModel))
+    assert len(runtime.predict_calls) == 2
