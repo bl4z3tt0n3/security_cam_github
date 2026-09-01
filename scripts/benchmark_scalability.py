@@ -328,6 +328,7 @@ def run_scalability(
                 scenario=scenario,
                 duration=duration,
                 warmup=warmup,
+                parallel_inference=parallel_inference,
             )
         )
 
