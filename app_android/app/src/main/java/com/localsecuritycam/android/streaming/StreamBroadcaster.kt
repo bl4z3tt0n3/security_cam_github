@@ -68,17 +68,18 @@ class StreamBroadcaster(private val metrics: StreamMetrics) {
     }
 
     private fun addMissingParameterSets(unit: EncodedAccessUnit): EncodedAccessUnit {
+        val hasSps = unit.nals.any { H264NalParser.nalType(it) == 7 }
+        val hasPps = unit.nals.any { H264NalParser.nalType(it) == 8 }
+        if (hasSps && hasPps) return unit
+
         val sets = run {
             lock.lock()
             try {
-                parameterSets?.let { H264ParameterSets(it.sps.copyOf(), it.pps.copyOf()) }
+                parameterSets
             } finally {
                 lock.unlock()
             }
         } ?: return unit
-        val hasSps = unit.nals.any { H264NalParser.nalType(it) == 7 }
-        val hasPps = unit.nals.any { H264NalParser.nalType(it) == 8 }
-        if (hasSps && hasPps) return unit
         val prefix = buildList {
             if (!hasSps) add(sets.sps.copyOf())
             if (!hasPps) add(sets.pps.copyOf())
