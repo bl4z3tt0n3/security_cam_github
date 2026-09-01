@@ -59,6 +59,7 @@ class FleetPersonDetectionController(QObject):
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._settings_generation = 0
+        self._source_generation = 0
 
     @property
     def settings(self) -> PersonDetectionSettings:
@@ -138,7 +139,13 @@ class FleetPersonDetectionController(QObject):
             if provider is not None
         }
         with self._lock:
+            changed = (
+                set(self._providers) != set(normalized)
+                or any(self._providers.get(key) is not value for key, value in normalized.items())
+            )
             self._providers = normalized
+            if changed:
+                self._source_generation += 1
             removed = set(self._pipelines).difference(normalized)
             for camera_id in removed:
                 self._pipelines.pop(camera_id, None)
@@ -164,6 +171,7 @@ class FleetPersonDetectionController(QObject):
                 self._settings,
                 dict(self._providers),
                 self._settings_generation,
+                self._source_generation,
             )
 
     def _resolve_model_path(self, model: str | None) -> Path | None:
@@ -348,14 +356,19 @@ class FleetPersonDetectionController(QObject):
         detector: PersonDetector | None = None
         loaded_signature: tuple[object, ...] | None = None
         loaded_generation = -1
+        observed_source_generation = -1
         last_sequences: dict[str, int] = {}
         next_at: dict[str, float] = {}
         failures: dict[str, int] = {}
 
         try:
             while not self._stop_event.is_set():
-                settings, providers, generation = self._state()
+                settings, providers, generation, source_generation = self._state()
                 signature = self._model_signature(settings)
+                if source_generation != observed_source_generation:
+                    observed_source_generation = source_generation
+                    last_sequences.clear()
+                    next_at.clear()
 
                 if signature != loaded_signature or generation != loaded_generation:
                     self._close_detector(detector)
@@ -497,8 +510,20 @@ class FleetPersonDetectionController(QObject):
                         )
                         continue
 
+                    current_settings, current_providers, current_generation, current_source_generation = self._state()
+                    if (
+                        current_generation != generation
+                        or self._model_signature(current_settings) != signature
+                        or current_source_generation != source_generation
+                    ):
+                        # Configuration/provider changes invalidate in-flight
+                        # results; the next loop uses the new fleet snapshot.
+                        continue
+
                     completed_at = time.monotonic()
                     for (camera_id, _provider, packet), raw in zip(chunk, results, strict=True):
+                        if camera_id not in current_providers:
+                            continue
                         detections = tuple(
                             replace(item, timestamp=packet.received_at_utc)
                             for item in raw
