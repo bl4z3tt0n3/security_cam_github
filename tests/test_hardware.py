@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pytest
 from app.config import AppConfig
-from app.hardware import adaptive_person_profile, resolve_cpu_thread_budget
+import app.hardware as hardware_module
+from app.hardware import (
+    adaptive_person_profile,
+    ensure_process_memory_budget,
+    resolve_cpu_thread_budget,
+)
 
 
 def _cameras(count: int) -> list[dict[str, object]]:
@@ -57,7 +65,7 @@ def test_intel_profile_applies_gpu_person_cpu_face_and_memory_bounds() -> None:
     )
 
     assert config.video.max_buffer_frames == 1
-    assert config.video.hardware_acceleration == "mfx"
+    assert config.video.hardware_acceleration == "auto"
     assert config.person_detection.backend == "openvino"
     assert config.person_detection.device == "gpu"
     assert config.person_detection.precision == "fp16"
@@ -97,3 +105,26 @@ def test_cpu_thread_budget_honors_explicit_value_and_bounds_auto() -> None:
     assert resolve_cpu_thread_budget(3) == 3
     automatic = resolve_cpu_thread_budget(0)
     assert 2 <= automatic <= 8
+
+def test_memory_budget_reserves_ram_for_integrated_gpu(monkeypatch) -> None:
+    monkeypatch.setattr(hardware_module, "process_rss_mb", lambda: 256.0)
+    monkeypatch.setattr(
+        hardware_module.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(available=900 * 1024 * 1024),
+    )
+
+    with pytest.raises(MemoryError, match="integrated-GPU profile reserves"):
+        ensure_process_memory_budget(6144, stage="test model")
+
+
+def test_memory_budget_allows_load_with_process_and_system_headroom(monkeypatch) -> None:
+    monkeypatch.setattr(hardware_module, "process_rss_mb", lambda: 512.0)
+    monkeypatch.setattr(
+        hardware_module.psutil,
+        "virtual_memory",
+        lambda: SimpleNamespace(available=8 * 1024 * 1024 * 1024),
+    )
+
+    ensure_process_memory_budget(6144, stage="test model")
+
