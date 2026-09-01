@@ -38,5 +38,6 @@ def create_opencv_source(
         max_buffer_frames=(
             max_buffer_frames if max_buffer_frames is not None else settings.max_buffer_frames
         ),
+        hardware_acceleration=settings.hardware_acceleration,
         logger=logger,
     )
