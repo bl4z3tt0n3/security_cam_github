@@ -20,6 +20,8 @@ from typing import Any
 import numpy as np
 import yaml
 
+from app.hardware import ensure_process_memory_budget, resolve_cpu_thread_budget
+
 from .base import PersonDetection, PersonDetectionError, PersonDetector, utc_now
 
 
@@ -67,6 +69,11 @@ class OpenVINOPersonDetector(PersonDetector):
         fallback_device: str = "none",
         classes: Sequence[str] = OPENVINO_PERSON_CLASSES,
         image_size: int = DEFAULT_OPENVINO_IMAGE_SIZE,
+        performance_mode: str = "latency",
+        num_streams: int = 0,
+        num_requests: int = 0,
+        cpu_threads: int = 0,
+        max_process_ram_mb: int = 0,
         model_root: Path | str | None = None,
         core_factory: Callable[[], Any] | None = None,
         yolo_factory: Callable[..., Any] | None = None,
@@ -83,6 +90,17 @@ class OpenVINOPersonDetector(PersonDetector):
         self._fallback_device = self._validate_fallback(fallback_device)
         self._classes = self._validate_classes(classes)
         self._image_size = self._validate_image_size(image_size)
+        self._performance_mode = self._validate_performance_mode(performance_mode)
+        self._num_streams = self._validate_non_negative_int(num_streams, "num_streams", 16)
+        self._num_requests = self._validate_non_negative_int(num_requests, "num_requests", 64)
+        self._cpu_threads = self._validate_non_negative_int(cpu_threads, "cpu_threads", 256)
+        self._max_process_ram_mb = self._validate_non_negative_int(
+            max_process_ram_mb,
+            "max_process_ram_mb",
+            131072,
+        )
+        self._runtime_tuned = False
+        self._runtime_tuning: dict[str, Any] = {}
         self._model_root = Path(model_root or Path.cwd()).expanduser().resolve()
         self._core_factory = core_factory
         self._yolo_factory = yolo_factory
@@ -111,6 +129,19 @@ class OpenVINOPersonDetector(PersonDetector):
             self._target_device,
             list(self._available_devices),
         )
+
+    @staticmethod
+    def _validate_performance_mode(value: str) -> str:
+        normalized = str(value).strip().lower()
+        if normalized not in {"latency", "throughput"}:
+            raise ValueError("OpenVINO performance_mode must be latency or throughput")
+        return normalized
+
+    @staticmethod
+    def _validate_non_negative_int(value: int, label: str, maximum: int) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+            raise ValueError(f"{label} must be an integer between 0 and {maximum}")
+        return value
 
     @staticmethod
     def _validate_model_spec(value: str | Path) -> str:
@@ -200,6 +231,14 @@ class OpenVINOPersonDetector(PersonDetector):
         return self._image_size
 
     @property
+    def runtime_tuned(self) -> bool:
+        return self._runtime_tuned
+
+    @property
+    def runtime_tuning(self) -> dict[str, Any]:
+        return dict(self._runtime_tuning)
+
+    @property
     def classes(self) -> tuple[str, ...]:
         return self._classes
 
@@ -258,6 +297,8 @@ class OpenVINOPersonDetector(PersonDetector):
     def close(self) -> None:
         self._model = None
         self._device_verified = False
+        self._runtime_tuned = False
+        self._runtime_tuning = {}
 
     def _load_core(self) -> None:
         try:
@@ -549,6 +590,10 @@ class OpenVINOPersonDetector(PersonDetector):
     def _load_runtime_model(self) -> Any:
         if self._cache_path is None:
             raise PersonDetectionError("OpenVINO IR cache is not prepared")
+        ensure_process_memory_budget(
+            self._max_process_ram_mb,
+            stage="YOLO OpenVINO model load",
+        )
         model = self._new_yolo(self._cache_path)
         task = str(getattr(model, "task", "detect") or "detect").casefold()
         if task not in {"detect", "detection"}:
@@ -580,6 +625,8 @@ class OpenVINOPersonDetector(PersonDetector):
                     verbose=False,
                     save=False,
                 )
+                if not self._runtime_tuned:
+                    self._retune_ultralytics_openvino(model)
                 if not self._device_verified:
                     execution_devices = self._read_execution_devices(model)
                     self._verify_execution_devices(execution_devices)
@@ -615,6 +662,87 @@ class OpenVINOPersonDetector(PersonDetector):
                     self._fallback_to_fp32(str(exc))
                     continue
                 raise PersonDetectionError(str(exc)) from exc
+
+    def _tuning_config(self) -> dict[str, Any]:
+        target_family = self._device_family(self._target_device)
+        config: dict[str, Any] = {}
+        if self._num_streams > 0:
+            # OpenVINO treats explicit NUM_STREAMS as the low-level alternative
+            # to PERFORMANCE_HINT. Avoid specifying both simultaneously.
+            config["NUM_STREAMS"] = self._num_streams
+        else:
+            config["PERFORMANCE_HINT"] = self._performance_mode.upper()
+            if self._num_requests > 0:
+                config["PERFORMANCE_HINT_NUM_REQUESTS"] = self._num_requests
+        if target_family == "CPU":
+            config["INFERENCE_NUM_THREADS"] = resolve_cpu_thread_budget(self._cpu_threads)
+            config["ENABLE_CPU_PINNING"] = False
+        return config
+
+    def _retune_ultralytics_openvino(self, model: Any) -> None:
+        """Recompile Ultralytics' OpenVINO backend with the requested policy.
+
+        Ultralytics intentionally exposes only device selection through YOLO.predict().
+        The compiled backend object is public enough to replace safely after its
+        first initialization, while preprocessing/postprocessing stay owned by
+        Ultralytics.
+        """
+
+        if self._cache_path is None:
+            return
+        owner = getattr(getattr(model, "predictor", None), "model", None)
+        if owner is None or not hasattr(owner, "ov_compiled_model"):
+            return
+        core = self._core
+        if core is None or not callable(getattr(core, "read_model", None)) or not callable(
+            getattr(core, "compile_model", None)
+        ):
+            return
+        try:
+            xml_path = next(self._cache_path.glob("*.xml"))
+        except StopIteration:
+            return
+
+        ensure_process_memory_budget(
+            self._max_process_ram_mb,
+            stage="YOLO OpenVINO runtime tuning",
+        )
+        config = self._tuning_config()
+        try:
+            ov_model = core.read_model(str(xml_path))
+            compiled = core.compile_model(ov_model, self._target_device, config)
+            owner.ov_compiled_model = compiled
+            try:
+                owner.input_name = compiled.input().get_any_name()
+            except Exception:
+                pass
+            owner.inference_mode = (
+                "THROUGHPUT"
+                if self._performance_mode == "throughput" or self._num_streams > 1
+                else "LATENCY"
+            )
+            # Keep any future static-shape recompilation on the same policy.
+            owner.compile_model = lambda runtime_model: core.compile_model(
+                runtime_model,
+                self._target_device,
+                config,
+            )
+            self._runtime_tuned = True
+            self._runtime_tuning = dict(config)
+            self._logger.info(
+                "person_detector backend=openvino runtime_tuned device=%s config=%s",
+                self._target_device,
+                config,
+            )
+        except Exception as exc:
+            # Preserve functional inference when a specific installed
+            # Ultralytics/OpenVINO combination changes internal backend shape.
+            self._runtime_tuned = False
+            self._runtime_tuning = {}
+            self._logger.warning(
+                "person_detector OpenVINO tuning unavailable; keeping baseline runtime: %s",
+                exc,
+            )
 
     def _read_execution_devices(self, model: Any) -> tuple[str, ...]:
         if self._execution_devices_reader is not None:
@@ -660,6 +788,8 @@ class OpenVINOPersonDetector(PersonDetector):
         previous = self._target_device
         self._target_device = cpu
         self._device_used = cpu
+        self._runtime_tuned = False
+        self._runtime_tuning = {}
         self._fallback_reason = reason
         self._logger.warning(
             "person_detector backend=openvino device_fallback from=%s to=%s reason=%s",
