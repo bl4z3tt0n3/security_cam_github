@@ -260,3 +260,34 @@ def test_two_camera_pipelines_keep_confirmation_state_independent() -> None:
 
     assert camera_one.state is CameraState.KNOWN
     assert camera_two.state is CameraState.FACE_ANALYSIS
+
+def test_matcher_normalizes_gallery_only_during_refresh(tmp_path, monkeypatch) -> None:
+    import app.face.matcher as matcher_module
+
+    embedder = FakeEmbedder(
+        embedding_dimension=3,
+        model_id="face-model",
+        callback=lambda image: [1, 0, 0],
+    )
+    store = PersonStore(tmp_path / "persons")
+    save_person(store, embedder, "Mario Rossi", [1, 0, 0])
+    save_person(store, embedder, "Lucia Bianchi", [0, 1, 0])
+
+    original = matcher_module._normalize_matrix
+    calls = 0
+
+    def counted(value, dimension, *, label):
+        nonlocal calls
+        calls += 1
+        return original(value, dimension, label=label)
+
+    monkeypatch.setattr(matcher_module, "_normalize_matrix", counted)
+    matcher = FaceMatcher(embedder, store, threshold=0.8)
+    calls_after_refresh = calls
+
+    for _ in range(4):
+        result = matcher.match(np.zeros((32, 32, 3), dtype=np.uint8))
+        assert result.status == "known"
+
+    assert calls_after_refresh == 2
+    assert calls == calls_after_refresh
