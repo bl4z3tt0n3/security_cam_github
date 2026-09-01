@@ -109,6 +109,9 @@ def apply_hardware_profile(config: Any) -> Any:
     # Bound decoded-frame memory and preview work. The Iris Xe shares system
     # memory, so keeping only the newest frame matters more than deep buffering.
     config.video.max_buffer_frames = 1
+    # Prefer Intel Media SDK/oneVPL (Quick Sync) when the OpenCV FFmpeg build
+    # exposes it. OpenCVVideoSource falls back to software if unavailable.
+    config.video.hardware_acceleration = "mfx"
     config.windows_ui.background_preview_fps = hardware.background_preview_fps
     config.windows_ui.background_preview_max_width = hardware.background_preview_max_width
 
