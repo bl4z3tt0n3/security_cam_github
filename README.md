@@ -109,10 +109,12 @@ throughput multi-stream invece di lasciare `NUM_STREAMS > 1` come semplice
 proprietà del modello compilato.
 
 Person detection GPU e face pipeline CPU usano gate distinti: possono quindi
-sovrapporsi realmente su Iris Xe e i7. Il face recognition Windows resta invece
-legato alla camera attiva/focus; portarlo a tutte le camere richiede un
-orchestratore face-fleet separato con stato per-camera e modelli condivisi, per
-non duplicare detector/embedder in RAM.
+sovrapporsi realmente su Iris Xe e i7. Anche la face pipeline Windows è ora
+fleet-aware: carica una sola copia di detector, landmarker ed embedder/matcher,
+poi crea orchestratori leggeri per camera con tracking, conferme temporali,
+scheduling e metriche separati. Il frontend continua a disegnare gli overlay
+solo sulla camera in focus, ma l'analisi face può partire in background su
+qualunque camera in cui la person detection condivisa mantenga un track attivo.
 
 Le fasi face sono tenute sulla CPU e ricevono un budget di thread. Il limite
 viene applicato sia ai modelli OpenVINO sia a SCRFD/FaceNet/ArcFace quando usano
