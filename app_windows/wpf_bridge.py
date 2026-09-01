@@ -51,7 +51,9 @@ from app_windows.config.credentials import (
 )
 from app_windows.config.persistence import CameraConfigRepository
 from app_windows.config.ui_config import UiSettings, choose_config_path
-from app_windows.inference.person_detection_controller import PersonDetectionController
+from app_windows.inference.person_detection_fleet_controller import (
+    FleetPersonDetectionController,
+)
 from app_windows.inference.face_recognition_controller import FaceRecognitionController
 from app_windows.main import _build_provider_factory, _fake_slots
 from app_windows.models.camera_view_state import CameraSlot, CameraViewSnapshot
@@ -99,7 +101,7 @@ class BridgeRuntime(QObject):
         self._config: Any
         self._slots: tuple[CameraSlot, ...]
         self._controller: CameraMonitorController
-        self._person_controller: PersonDetectionController
+        self._person_controller: FleetPersonDetectionController
         self._face_controller: FaceRecognitionController
         self._connection_tester: AsyncConnectionTester
         self._source_factory: Any
@@ -192,20 +194,24 @@ class BridgeRuntime(QObject):
             read_timeout_s=self._config.video.read_timeout_seconds,
             logger=self._logger,
         )
-        inference_gate = InferenceGate()
-        self._person_controller = PersonDetectionController(
+        # Person detection is continuous on the Iris Xe while face stages
+        # are intermittent CPU work. Separate gates let those devices overlap
+        # instead of serializing unrelated model instances.
+        person_gate = InferenceGate()
+        face_gate = InferenceGate()
+        self._person_controller = FleetPersonDetectionController(
             repo_root=self._repo_root,
             settings=PersonDetectionSettings.from_app_config(
                 self._config,
                 repo_root=self._repo_root,
             ),
-            inference_gate=inference_gate,
+            inference_gate=person_gate,
             logger=self._logger,
         )
         self._face_controller = FaceRecognitionController(
             repo_root=self._repo_root,
             config=self._config,
-            inference_gate=inference_gate,
+            inference_gate=face_gate,
             logger=self._logger,
         )
         self._connection_tester = AsyncConnectionTester(
@@ -264,6 +270,7 @@ class BridgeRuntime(QObject):
         self._command_thread.start()
         self._command_timer.start()
         self._controller.start()
+        self._person_controller.set_sources(self._controller.providers)
         self._person_controller.start()
         self._face_controller.start()
         self._emit_person_snapshot(self._person_controller.snapshot)
@@ -696,6 +703,15 @@ class BridgeRuntime(QObject):
 
     @Slot(str, bool, str)
     def _on_camera_reconfigured(self, camera_id: str, success: bool, message: str) -> None:
+        # Provider replacement happens inside CameraMonitorController. Refresh
+        # the read-only fleet view after completion so inference follows the
+        # same already-open streams as the UI.
+        self._person_controller.set_sources(self._controller.providers)
+        active = self._active_camera_id
+        if active is not None:
+            provider = self._controller.provider_for(active)
+            self._person_controller.set_active_camera(active, provider)
+            self._face_controller.set_active_camera(active, provider)
         self._emit(
             "camera_reconfigured",
             {"camera_id": camera_id, "ok": success, "message": redact_log_text(message)},
