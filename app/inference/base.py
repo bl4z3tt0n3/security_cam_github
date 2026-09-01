@@ -97,6 +97,12 @@ class PersonDetector(ABC):
 
         return False
 
+    @property
+    def supports_concurrent_inference(self) -> bool:
+        """Whether one detector instance can execute independent calls concurrently."""
+
+        return False
+
     def close(self) -> None:
         """Release optional model resources."""
 
