@@ -332,9 +332,15 @@ class OpenVINOFaceDetector0205(FaceDetector):
         compiled_model: Any | None = None,
         core: Any | None = None,
         cache_dir: Path | None = None,
+        performance_mode: str = "latency",
+        cpu_threads: int = 0,
+        max_process_ram_mb: int = 0,
     ) -> None:
         self._model_path = Path(model_path).expanduser()
         self._confidence_threshold = _validate_threshold(confidence_threshold)
+        self._performance_mode = str(performance_mode).strip().lower()
+        self._cpu_threads = int(cpu_threads)
+        self._max_process_ram_mb = int(max_process_ram_mb)
         self._device_requested = str(device).strip().lower()
         if self._device_requested not in {"auto", "cpu", "gpu", "npu"}:
             raise ValueError("OpenVINO device must be one of: auto, cpu, gpu, npu")
@@ -377,6 +383,9 @@ class OpenVINOFaceDetector0205(FaceDetector):
                 model_id=self.detector_id,
                 model_sha256=artifact_sha256(xml_path),
                 cache_root=self._cache_dir,
+                performance_mode=self._performance_mode,
+                cpu_threads=self._cpu_threads,
+                max_process_ram_mb=self._max_process_ram_mb,
             )
             self._inspect_compiled(self._compiled, fallback_device=requested.lower())
         except FaceDetectorError:
@@ -604,8 +613,14 @@ class OpenVINOLandmarksRegressor(FaceLandmarker):
         compiled_model: Any | None = None,
         core: Any | None = None,
         cache_dir: Path | None = None,
+        performance_mode: str = "latency",
+        cpu_threads: int = 0,
+        max_process_ram_mb: int = 0,
     ) -> None:
         self._model_path = Path(model_path).expanduser()
+        self._performance_mode = str(performance_mode).strip().lower()
+        self._cpu_threads = int(cpu_threads)
+        self._max_process_ram_mb = int(max_process_ram_mb)
         self._device_requested = str(device).strip().lower()
         if self._device_requested not in {"auto", "cpu", "gpu", "npu"}:
             raise ValueError("landmarker device must be one of: auto, cpu, gpu, npu")
@@ -643,6 +658,9 @@ class OpenVINOLandmarksRegressor(FaceLandmarker):
                 model_id=self.landmarker_id,
                 model_sha256=artifact_sha256(xml_path),
                 cache_root=self._cache_dir,
+                performance_mode=self._performance_mode,
+                cpu_threads=self._cpu_threads,
+                max_process_ram_mb=self._max_process_ram_mb,
             )
             self._inspect_compiled(self._compiled, fallback_device=requested.lower())
         except FaceDetectorError:
