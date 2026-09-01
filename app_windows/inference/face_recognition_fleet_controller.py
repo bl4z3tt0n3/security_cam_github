@@ -463,6 +463,7 @@ class FleetFaceRecognitionController(FaceRecognitionController):
         loaded_generation = -1
         observed_source_generation = -1
         template: FaceRecognitionOrchestrator | None = None
+        runtime_attempted = False
         last_sequences: dict[str, int] = {}
 
         try:
@@ -479,6 +480,7 @@ class FleetFaceRecognitionController(FaceRecognitionController):
                 if loaded_settings != settings or loaded_generation != generation:
                     self._close_runtime()
                     template = None
+                    runtime_attempted = False
                     loaded_settings = settings
                     loaded_generation = generation
                     last_sequences.clear()
@@ -519,7 +521,13 @@ class FleetFaceRecognitionController(FaceRecognitionController):
                             generation=generation,
                         )
                 should_load = bool(eligible or active_camera_id)
-                if template is None and should_load and settings.face_detection_enabled:
+                if (
+                    template is None
+                    and not runtime_attempted
+                    and should_load
+                    and settings.face_detection_enabled
+                ):
+                    runtime_attempted = True
                     target = active_camera_id or (eligible[0] if eligible else None)
                     if target is not None:
                         self._publish_fleet(
