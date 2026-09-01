@@ -39,8 +39,9 @@ def test_example_configuration_loads() -> None:
     assert config.video.rtsp_transport == "tcp"
     assert config.video.max_reconnect_attempts == 0
     assert config.video.max_buffer_frames == 1
-    assert config.inference.person_detection_fps == 2
-    assert config.person_detection.inference_fps == 2
+    assert config.video.hardware_acceleration == "mfx"
+    assert config.inference.person_detection_fps == 3
+    assert config.person_detection.inference_fps == 3
     assert config.person_detection.enabled is False
     assert config.person_detection.backend == "openvino"
     assert config.person_detection.model == "models/yolo26s.pt"
@@ -51,6 +52,12 @@ def test_example_configuration_loads() -> None:
     assert config.person_detection.device == "gpu"
     assert config.person_detection.fallback_device == "cpu"
     assert config.person_detection.image_size == 640
+    assert config.person_detection.openvino_performance_mode == "latency"
+    assert config.person_detection.openvino_num_streams == 1
+    assert config.person_detection.openvino_num_requests == 1
+    assert config.person_detection.max_process_ram_mb == 6144
+    assert config.hardware_optimization.enabled is True
+    assert config.hardware_optimization.profile == "intel_iris_xe"
     assert config.motion_detection.enabled is False
     assert config.motion_detection.pixel_threshold == 25
     assert config.motion_detection.min_changed_fraction == pytest.approx(0.01)
@@ -161,13 +168,13 @@ def test_example_configuration_contains_face_quality_settings() -> None:
     assert config.face_detection.model == (
         "models/face_detection/scrfd_2.5g_kps/scrfd_2.5g_bnkps.onnx"
     )
-    assert config.face_detection.device == "auto"
+    assert config.face_detection.device == "cpu"
     assert config.recognition.model == (
         "models/face_embedding/face-reidentification-retail-0095/"
         "face-reidentification-retail-0095.xml"
     )
     assert config.recognition.model_version == "1"
-    assert config.recognition.device == "auto"
+    assert config.recognition.device == "cpu"
 
 
 def test_face_quality_rejects_reversed_brightness_range() -> None:
