@@ -79,11 +79,11 @@ class VideoFrameRenderer(
     private var firstPreviewFrameRenderedLogged = false
     private var previewDiagnosticActive = false
     private var lastPreviewDiagnosticTarget: String? = null
-    // Render-thread-only scratch buffers. Reusing them removes several small
-    // allocations from every camera frame and therefore reduces GC pressure.
+    // SurfaceTexture writes this matrix every frame. Rotation/FIT_CENTER state
+    // is cached separately per target and rebuilt only when geometry/orientation changes.
     private val textureMatrixScratch = FloatArray(16)
-    private val rotationMatrixScratch = FloatArray(16)
-    private val geometryMatrixScratch = FloatArray(16)
+    private var encoderRenderState: TargetRenderState? = null
+    private var previewRenderState: TargetRenderState? = null
 
     private val diagnosticsEnabled: Boolean
         get() = diagnosticMode != PreviewDiagnosticMode.NORMAL
@@ -183,6 +183,8 @@ class VideoFrameRenderer(
     /** Update geometry without touching Camera2, MediaCodec, or RTSP state. */
     fun setTransform(next: VideoTransform) {
         transform = next
+        encoderRenderState = null
+        previewRenderState = null
         StreamErrorLogger.info(
             "Renderer transform updated camera2_rotation=${next.rotationDegrees} " +
                 "pixel_clockwise_rotation=${next.pixelClockwiseRotationDegrees} " +
@@ -448,13 +450,13 @@ class VideoFrameRenderer(
         onFrameRendered(texture.timestamp)
     }
 
-    private fun textureRotationMatrix(
+    private fun buildTextureRotationMatrix(
+        output: FloatArray,
         transform: VideoTransform,
         mirror: Boolean,
         surfaceTexturePixelClockwiseRotation: Int,
-    ): FloatArray {
-        val matrix = rotationMatrixScratch
-        Matrix.setIdentityM(matrix, 0)
+    ) {
+        Matrix.setIdentityM(output, 0)
         val glTextureRotation = textureCoordinateRotationDegrees(
             cameraRelativeRotationDegrees = transform.rotationDegrees,
             lensFacing = transform.orientation.lensFacing,
@@ -462,19 +464,111 @@ class VideoFrameRenderer(
             outputPixelClockwiseRotationDegrees = transform.outputPixelClockwiseRotationDegrees,
         )
         if (glTextureRotation != 0 || mirror) {
-            Matrix.translateM(matrix, 0, 0.5f, 0.5f, 0f)
+            Matrix.translateM(output, 0, 0.5f, 0.5f, 0f)
             Matrix.rotateM(
-                matrix,
+                output,
                 0,
                 glTextureRotation.toFloat(),
                 0f,
                 0f,
                 1f,
             )
-            if (mirror) Matrix.scaleM(matrix, 0, -1f, 1f, 1f)
-            Matrix.translateM(matrix, 0, -0.5f, -0.5f, 0f)
+            if (mirror) Matrix.scaleM(output, 0, -1f, 1f, 1f)
+            Matrix.translateM(output, 0, -0.5f, -0.5f, 0f)
         }
-        return matrix
+    }
+
+    private fun targetDimensions(sourceTransform: VideoTransform, isEncoder: Boolean): Pair<Int, Int> =
+        if (isEncoder) {
+            sourceTransform.targetWidth.coerceAtLeast(1) to
+                sourceTransform.targetHeight.coerceAtLeast(1)
+        } else {
+            (previewNativeSurface?.width ?: sourceTransform.targetWidth).coerceAtLeast(1) to
+                (previewNativeSurface?.height ?: sourceTransform.targetHeight).coerceAtLeast(1)
+        }
+
+    private fun renderStateFor(
+        sourceTransform: VideoTransform,
+        surfaceTexturePixelClockwiseRotation: Int,
+        isEncoder: Boolean,
+        renderMode: PreviewDiagnosticMode,
+        useGeometry: Boolean,
+    ): TargetRenderState {
+        val (targetWidth, targetHeight) = targetDimensions(sourceTransform, isEncoder)
+        val mirror = when (renderMode) {
+            PreviewDiagnosticMode.OES_IDENTITY,
+            PreviewDiagnosticMode.OES_ROTATION -> false
+            else -> if (isEncoder) sourceTransform.mirrorStream else sourceTransform.mirrorPreview
+        }
+        val current = if (isEncoder) encoderRenderState else previewRenderState
+        if (
+            current != null &&
+            current.sourceTransform === sourceTransform &&
+            current.surfaceTexturePixelClockwiseRotation == surfaceTexturePixelClockwiseRotation &&
+            current.targetWidth == targetWidth &&
+            current.targetHeight == targetHeight &&
+            current.renderMode == renderMode &&
+            current.useGeometry == useGeometry &&
+            current.mirror == mirror
+        ) {
+            return current
+        }
+
+        val glTextureRotation = if (renderMode == PreviewDiagnosticMode.OES_IDENTITY) {
+            0
+        } else {
+            textureCoordinateRotationDegrees(
+                cameraRelativeRotationDegrees = sourceTransform.rotationDegrees,
+                lensFacing = sourceTransform.orientation.lensFacing,
+                surfaceTexturePixelClockwiseRotationDegrees = surfaceTexturePixelClockwiseRotation,
+                outputPixelClockwiseRotationDegrees = sourceTransform.outputPixelClockwiseRotationDegrees,
+            )
+        }
+        val rotationMatrix = FloatArray(16)
+        if (renderMode == PreviewDiagnosticMode.OES_IDENTITY) {
+            Matrix.setIdentityM(rotationMatrix, 0)
+        } else {
+            buildTextureRotationMatrix(
+                rotationMatrix,
+                sourceTransform,
+                mirror = mirror,
+                surfaceTexturePixelClockwiseRotation = surfaceTexturePixelClockwiseRotation,
+            )
+        }
+
+        val targetTransform = sourceTransform.forTarget(targetWidth, targetHeight)
+        val geometryMatrix = FloatArray(16)
+        Matrix.setIdentityM(geometryMatrix, 0)
+        if (useGeometry) {
+            Matrix.scaleM(
+                geometryMatrix,
+                0,
+                targetTransform.scaleX,
+                targetTransform.scaleY,
+                1f,
+            )
+        }
+        val state = TargetRenderState(
+            sourceTransform = sourceTransform,
+            surfaceTexturePixelClockwiseRotation = surfaceTexturePixelClockwiseRotation,
+            targetWidth = targetWidth,
+            targetHeight = targetHeight,
+            renderMode = renderMode,
+            useGeometry = useGeometry,
+            mirror = mirror,
+            glTextureRotation = glTextureRotation,
+            rotationMatrix = rotationMatrix,
+            geometryMatrix = geometryMatrix,
+            targetTransform = targetTransform,
+        )
+        if (isEncoder) encoderRenderState = state else previewRenderState = state
+        logGeometry(
+            isEncoder = isEncoder,
+            width = targetWidth,
+            height = targetHeight,
+            transform = targetTransform,
+        )
+        return state
     }
 
     private fun makeCurrentForTextureUpdate() {
@@ -502,40 +596,21 @@ class VideoFrameRenderer(
             val renderMode = if (isEncoder) PreviewDiagnosticMode.NORMAL else diagnosticMode
             val useGeometry = isEncoder || renderMode == PreviewDiagnosticMode.NORMAL ||
                 renderMode == PreviewDiagnosticMode.FULL
-            val glTextureRotation = if (renderMode == PreviewDiagnosticMode.OES_IDENTITY) {
-                0
-            } else {
-                textureCoordinateRotationDegrees(
-                    cameraRelativeRotationDegrees = sourceTransform.rotationDegrees,
-                    lensFacing = sourceTransform.orientation.lensFacing,
-                    surfaceTexturePixelClockwiseRotationDegrees = surfaceTexturePixelClockwiseRotation,
-                    outputPixelClockwiseRotationDegrees = sourceTransform.outputPixelClockwiseRotationDegrees,
-                )
-            }
-            val rotationMatrix = when (renderMode) {
-                PreviewDiagnosticMode.OES_IDENTITY -> identityMatrix()
-                PreviewDiagnosticMode.OES_ROTATION -> textureRotationMatrix(
-                    sourceTransform,
-                    mirror = false,
-                    surfaceTexturePixelClockwiseRotation = surfaceTexturePixelClockwiseRotation,
-                )
-                else -> textureRotationMatrix(
-                    sourceTransform,
-                    if (isEncoder) sourceTransform.mirrorStream else sourceTransform.mirrorPreview,
-                    surfaceTexturePixelClockwiseRotation,
-                )
-            }
+            val state = renderStateFor(
+                sourceTransform = sourceTransform,
+                surfaceTexturePixelClockwiseRotation = surfaceTexturePixelClockwiseRotation,
+                isEncoder = isEncoder,
+                renderMode = renderMode,
+                useGeometry = useGeometry,
+            )
             drawTo(
                 target = target,
                 textureMatrix = textureMatrix,
                 surfaceTexturePixelClockwiseRotation = surfaceTexturePixelClockwiseRotation,
-                glTextureRotation = glTextureRotation,
-                rotationMatrix = rotationMatrix,
+                state = state,
                 sourceTransform = sourceTransform,
                 isEncoder = isEncoder,
                 timestampNs = timestampNs,
-                useGeometry = useGeometry,
-                renderMode = renderMode,
             )
             true
         } catch (error: Exception) {
@@ -559,45 +634,22 @@ class VideoFrameRenderer(
         target: EGLSurface,
         textureMatrix: FloatArray,
         surfaceTexturePixelClockwiseRotation: Int,
-        glTextureRotation: Int,
-        rotationMatrix: FloatArray,
+        state: TargetRenderState,
         sourceTransform: VideoTransform,
         isEncoder: Boolean,
         timestampNs: Long,
-        useGeometry: Boolean,
-        renderMode: PreviewDiagnosticMode,
     ) {
         check(EGL14.eglMakeCurrent(display, target, target, context)) { "EGL surface could not be made current" }
         logEglError("eglMakeCurrent(${if (isEncoder) "encoder" else "preview"})")
         val vertices = vertexBuffer ?: return
         val texCoords = texCoordBuffer ?: return
-        // Target geometry is already known by the pipeline. Querying EGL for
-        // width/height on every draw adds driver calls to the hot path.
-        val targetWidth = if (isEncoder) {
-            sourceTransform.targetWidth
-        } else {
-            previewNativeSurface?.width ?: sourceTransform.targetWidth
-        }
-        val targetHeight = if (isEncoder) {
-            sourceTransform.targetHeight
-        } else {
-            previewNativeSurface?.height ?: sourceTransform.targetHeight
-        }
-        val targetTransform = sourceTransform.forTarget(
-            targetWidth.coerceAtLeast(1),
-            targetHeight.coerceAtLeast(1),
-        )
-        logGeometry(
-            isEncoder = isEncoder,
-            width = targetWidth.coerceAtLeast(1),
-            height = targetHeight.coerceAtLeast(1),
-            transform = targetTransform,
-        )
-        val geometryMatrix = geometryMatrixScratch
-        Matrix.setIdentityM(geometryMatrix, 0)
-        if (useGeometry) {
-            Matrix.scaleM(geometryMatrix, 0, targetTransform.scaleX, targetTransform.scaleY, 1f)
-        }
+        val targetWidth = state.targetWidth
+        val targetHeight = state.targetHeight
+        val targetTransform = state.targetTransform
+        val rotationMatrix = state.rotationMatrix
+        val geometryMatrix = state.geometryMatrix
+        val glTextureRotation = state.glTextureRotation
+        val renderMode = state.renderMode
         if (diagnosticsEnabled && !isEncoder) {
             val blendEnabled = GLES20.glIsEnabled(GLES20.GL_BLEND)
             val scissorEnabled = GLES20.glIsEnabled(GLES20.GL_SCISSOR_TEST)
@@ -664,11 +716,6 @@ class VideoFrameRenderer(
         checkGlErrors("after eglSwapBuffers")
     }
 
-    private fun identityMatrix(): FloatArray {
-        Matrix.setIdentityM(rotationMatrixScratch, 0)
-        return rotationMatrixScratch
-    }
-
     private fun requireLocation(name: String, location: Int): Int {
         if (diagnosticsEnabled && location < 0) {
             error("GLES location unavailable name=$name")
@@ -718,6 +765,7 @@ class VideoFrameRenderer(
             (surface == null || encoderSurface != EGL14.EGL_NO_SURFACE)
         ) return
         destroyEncoderSurface()
+        encoderRenderState = null
         if (surface != null) {
             check(surface.isValid) { "encoder Surface is invalid" }
             val created = createWindowSurface(surface)
@@ -757,6 +805,7 @@ class VideoFrameRenderer(
             previewNativeSurface?.height == attachment.height
         ) return
         destroyPreviewSurface()
+        previewRenderState = null
         if (attachment != null) {
             val created = createWindowSurface(attachment.surface)
             previewSurface = created
@@ -1008,6 +1057,20 @@ class VideoFrameRenderer(
             void main() { gl_FragColor = texture2D(sTexture, vTexCoord); }
         """
     }
+
+    private data class TargetRenderState(
+        val sourceTransform: VideoTransform,
+        val surfaceTexturePixelClockwiseRotation: Int,
+        val targetWidth: Int,
+        val targetHeight: Int,
+        val renderMode: PreviewDiagnosticMode,
+        val useGeometry: Boolean,
+        val mirror: Boolean,
+        val glTextureRotation: Int,
+        val rotationMatrix: FloatArray,
+        val geometryMatrix: FloatArray,
+        val targetTransform: VideoTransform,
+    )
 
     private data class LoggedGeometry(
         val width: Int,
