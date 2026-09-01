@@ -13,6 +13,8 @@ import re
 import threading
 from typing import Any
 
+from app.hardware import ensure_process_memory_budget, resolve_cpu_thread_budget
+
 
 class OpenVINOUnavailableError(RuntimeError):
     """Raised when OpenVINO is not installed or exposes no usable Core."""
@@ -79,31 +81,62 @@ class OpenVINOCoreManager:
         model_id: str,
         model_sha256: str | None,
         cache_root: Path | None = None,
+        performance_mode: str = "latency",
+        num_streams: int = 0,
+        num_requests: int = 0,
+        cpu_threads: int = 0,
+        max_process_ram_mb: int = 0,
     ) -> Any:
-        """Compile with an isolated cache when a cache root was configured."""
+        """Compile with cache plus bounded hardware-aware runtime properties."""
 
         requested = str(device).upper()
+        ensure_process_memory_budget(
+            max_process_ram_mb,
+            stage=f"OpenVINO compile {model_id}",
+        )
         cache_dir: Path | None = None
         if cache_root is not None:
             safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(model_id))
             fingerprint = (model_sha256 or "no-sha256")[:32]
             cache_dir = Path(cache_root) / f"{safe_id}-{fingerprint}-{requested.lower()}"
             cache_dir.mkdir(parents=True, exist_ok=True)
+        config: dict[str, Any] = {}
         if cache_dir is not None:
+            config["CACHE_DIR"] = str(cache_dir)
+
+        mode = str(performance_mode).strip().upper()
+        streams = max(0, int(num_streams))
+        requests = max(0, int(num_requests))
+        if streams > 0:
+            # Explicit streams are an alternative to PERFORMANCE_HINT. This
+            # keeps tuning deterministic on the Iris Xe profile.
+            config["NUM_STREAMS"] = streams
+        elif mode in {"LATENCY", "THROUGHPUT"}:
+            config["PERFORMANCE_HINT"] = mode
+            if requests > 0:
+                config["PERFORMANCE_HINT_NUM_REQUESTS"] = requests
+
+        if requested.startswith("CPU"):
+            config["INFERENCE_NUM_THREADS"] = resolve_cpu_thread_budget(cpu_threads)
+            # Complex apps with decode/UI/other models benefit from allowing
+            # Windows to schedule the bounded thread set instead of hard pinning.
+            config["ENABLE_CPU_PINNING"] = False
+
+        if config:
             try:
-                return core.compile_model(
-                    model,
-                    requested,
-                    {"CACHE_DIR": str(cache_dir)},
-                )
-            except (TypeError, ValueError):
-                # Older OpenVINO Python bindings accept cache configuration on
-                # Core instead of the compile call.  Keep the same isolated
-                # directory and retry only the API shape, never the device.
+                return core.compile_model(model, requested, config)
+            except TypeError:
+                # Older bindings may only reject CACHE_DIR in compile config.
+                # Preserve all performance properties and move only cache setup.
+                if cache_dir is None:
+                    raise
                 try:
                     core.set_property(requested, {"CACHE_DIR": str(cache_dir)})
                 except Exception:
                     core.set_property({"CACHE_DIR": str(cache_dir)})
+                fallback = dict(config)
+                fallback.pop("CACHE_DIR", None)
+                return core.compile_model(model, requested, fallback)
         return core.compile_model(model, requested)
 
 
