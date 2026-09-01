@@ -378,6 +378,18 @@ internal class StreamingPipeline(
     }
 
     private fun validateRtspStart(bindAddress: InetAddress) {
+        // App-level policy: an automatically exposed LAN listener must be
+        // authenticated. RtspServer itself stays reusable for explicitly
+        // configured unauthenticated listeners in lower-level tests/tools.
+        if (!bindAddress.isLoopbackAddress && !request.settings.stream.authEnabled) {
+            throw StreamFailureException(
+                StreamErrorFormatter.fromMessage(
+                    StreamErrorKind.CONFIGURATION,
+                    "Basic authentication is required for a non-loopback RTSP listener",
+                    retryable = false,
+                ),
+            )
+        }
         val credentials = if (request.settings.stream.authEnabled) {
             RtspCredentials(
                 enabled = true,
