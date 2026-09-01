@@ -60,6 +60,7 @@ class CameraViewSnapshot:
     worker_snapshot: CameraWorkerSnapshot | None = None
     last_frame_age_s: float | None = None
     display_fps: float | None = None
+    hardware_acceleration: str | None = None
 
 
 def camera_slots_from_config(config: AppConfig, *, slot_count: int = 6) -> tuple[CameraSlot, ...]:
