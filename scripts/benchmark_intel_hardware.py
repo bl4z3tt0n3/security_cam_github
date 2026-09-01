@@ -32,31 +32,20 @@ from app.inference import create_person_detector
 from app.video.factory import create_opencv_source
 
 
-CANDIDATES: tuple[dict[str, Any], ...] = (
+CANDIDATES: tuple[dict[str, Any], ...] = tuple(
     {
-        "name": "yolo26s-640-1stream",
-        "model": "models/yolo26s.pt",
-        "image_size": 640,
-        "performance_mode": "latency",
-        "num_streams": 1,
-        "num_requests": 1,
-    },
-    {
-        "name": "yolo26s-640-2stream",
-        "model": "models/yolo26s.pt",
-        "image_size": 640,
-        "performance_mode": "throughput",
-        "num_streams": 2,
-        "num_requests": 2,
-    },
-    {
-        "name": "yolo26n-512-2stream",
-        "model": "models/yolo26n.pt",
-        "image_size": 512,
-        "performance_mode": "throughput",
-        "num_streams": 2,
-        "num_requests": 2,
-    },
+        "name": f"{model_name}-{image_size}-{streams}stream",
+        "model": model,
+        "image_size": image_size,
+        "performance_mode": "latency" if streams == 1 else "throughput",
+        "num_streams": streams,
+        "num_requests": streams,
+    }
+    for model_name, model, image_size in (
+        ("yolo26s", "models/yolo26s.pt", 640),
+        ("yolo26n", "models/yolo26n.pt", 512),
+    )
+    for streams in (1, 2, 3, 4)
 )
 
 
@@ -263,29 +252,24 @@ def _recommend_model(results: list[dict[str, Any]], count: int) -> dict[str, Any
         if isinstance(throughput, (int, float)):
             usable.append((row, float(throughput)))
 
-    # Preserve the larger S model whenever measured raw throughput has 30%
-    # headroom. Prefer the 2-stream S profile for >1 camera.
+    # Preserve the larger S model whenever it has 30% aggregate headroom.
+    # Among adequate candidates choose the fewest streams: this limits queueing,
+    # intermediate buffers and shared-memory pressure on an integrated GPU.
+    adequate = [item for item in usable if item[1] >= target * 1.30]
     s_rows = [
-        item for item in usable
+        item
+        for item in adequate
         if item[0]["candidate"]["model"].endswith("yolo26s.pt")
-        and item[1] >= target * 1.30
     ]
-    if s_rows:
-        if count > 1:
-            s_rows.sort(
-                key=lambda item: (
-                    item[0]["candidate"]["num_streams"] != 2,
-                    -item[1],
-                )
+    preferred = s_rows or adequate
+    if preferred:
+        preferred.sort(
+            key=lambda item: (
+                int(item[0]["candidate"]["num_streams"]),
+                -item[1],
             )
-        else:
-            s_rows.sort(
-                key=lambda item: (
-                    item[0]["candidate"]["num_streams"] != 1,
-                    -item[1],
-                )
-            )
-        chosen, throughput = s_rows[0]
+        )
+        chosen, throughput = preferred[0]
     elif usable:
         chosen, throughput = max(usable, key=lambda item: item[1])
     else:
@@ -497,10 +481,17 @@ def _decode_once(config: Any, url: str, mode: str, seconds: float) -> dict[str, 
     frames = 0
     corrupt = 0
     process = psutil.Process()
-    process.cpu_percent(None)
-    started = time.perf_counter()
     try:
         source.open()
+        # Do not charge backend startup/RTSP negotiation to steady-state decode.
+        warmup_deadline = time.perf_counter() + min(1.0, max(0.2, seconds * 0.25))
+        while time.perf_counter() < warmup_deadline:
+            result = source.read(0.1)
+            if result.packet is not None:
+                break
+
+        process.cpu_percent(None)
+        started = time.perf_counter()
         deadline = started + seconds
         while time.perf_counter() < deadline:
             result = source.read(min(0.25, max(0.01, deadline - time.perf_counter())))
@@ -536,6 +527,12 @@ def main() -> int:
     try:
         if args.apply and not args.run:
             raise ValueError("--apply requires --run")
+        if args.iterations < 1:
+            raise ValueError("--iterations must be at least 1")
+        if args.warmup < 0:
+            raise ValueError("--warmup cannot be negative")
+        if args.decode_seconds <= 0:
+            raise ValueError("--decode-seconds must be greater than zero")
         config_path, config = _load(args.config)
         count = _camera_count(config, args.camera_count)
         report: dict[str, Any] = {
