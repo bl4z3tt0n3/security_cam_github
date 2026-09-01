@@ -183,8 +183,9 @@ class CameraRuntime:
         with self._condition:
             frame = self._latest_frame
             detections = self._latest_detections
-        if frame is not None and callable(getattr(frame, "copy", None)):
-            frame = frame.copy()
+        # Frames are published as immutable-by-contract references. Copying a
+        # Full-HD/4K numpy array on every UI poll is prohibitively expensive;
+        # consumers that need to mutate pixels must make their own copy.
         return frame, detections
 
     @property
