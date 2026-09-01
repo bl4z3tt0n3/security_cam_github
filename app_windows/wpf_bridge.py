@@ -54,7 +54,9 @@ from app_windows.config.ui_config import UiSettings, choose_config_path
 from app_windows.inference.person_detection_fleet_controller import (
     FleetPersonDetectionController,
 )
-from app_windows.inference.face_recognition_controller import FaceRecognitionController
+from app_windows.inference.face_recognition_fleet_controller import (
+    FleetFaceRecognitionController,
+)
 from app_windows.main import _build_provider_factory, _fake_slots
 from app_windows.models.camera_view_state import CameraSlot, CameraViewSnapshot
 from app_windows.models.person_detection_state import (
@@ -102,7 +104,7 @@ class BridgeRuntime(QObject):
         self._slots: tuple[CameraSlot, ...]
         self._controller: CameraMonitorController
         self._person_controller: FleetPersonDetectionController
-        self._face_controller: FaceRecognitionController
+        self._face_controller: FleetFaceRecognitionController
         self._connection_tester: AsyncConnectionTester
         self._source_factory: Any
         self._fake_mode = bool(args.fake_cameras)
@@ -208,7 +210,7 @@ class BridgeRuntime(QObject):
             inference_gate=person_gate,
             logger=self._logger,
         )
-        self._face_controller = FaceRecognitionController(
+        self._face_controller = FleetFaceRecognitionController(
             repo_root=self._repo_root,
             config=self._config,
             inference_gate=face_gate,
@@ -271,6 +273,7 @@ class BridgeRuntime(QObject):
         self._command_timer.start()
         self._controller.start()
         self._person_controller.set_sources(self._controller.providers)
+        self._face_controller.set_sources(self._controller.providers)
         self._person_controller.start()
         self._face_controller.start()
         self._emit_person_snapshot(self._person_controller.snapshot)
@@ -707,6 +710,7 @@ class BridgeRuntime(QObject):
         # the read-only fleet view after completion so inference follows the
         # same already-open streams as the UI.
         self._person_controller.set_sources(self._controller.providers)
+        self._face_controller.set_sources(self._controller.providers)
         active = self._active_camera_id
         if active is not None:
             provider = self._controller.provider_for(active)
