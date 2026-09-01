@@ -115,6 +115,9 @@ def create_face_detector(
             confidence_threshold=config.confidence_threshold,
             device=effective_device,
             cache_dir=(model_root or Path.cwd()) / ".cache" / "openvino",
+            performance_mode=config.openvino_performance_mode,
+            cpu_threads=config.openvino_cpu_threads,
+            max_process_ram_mb=config.max_process_ram_mb,
         )
     if detector_id == "yunet_2023mar" and backend == "opencv_dnn":
         return YuNetFaceDetector(
@@ -151,6 +154,9 @@ def create_face_landmarker(
         path,
         device=config.device,
         cache_dir=(model_root or Path.cwd()) / ".cache" / "openvino",
+        performance_mode=config.openvino_performance_mode,
+        cpu_threads=config.openvino_cpu_threads,
+        max_process_ram_mb=config.max_process_ram_mb,
     )
 
 
@@ -210,6 +216,9 @@ def create_face_embedder(
             model_version=config.model_version,
             device=normalize_device_for_backend(config.device, backend),
             cache_dir=(model_root or Path.cwd()) / ".cache" / "openvino",
+            performance_mode=config.openvino_performance_mode,
+            cpu_threads=config.openvino_cpu_threads,
+            max_process_ram_mb=config.max_process_ram_mb,
         )
     if backend == "onnxruntime":
         return OnnxFaceEmbedder(
