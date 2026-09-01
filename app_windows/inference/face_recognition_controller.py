@@ -155,6 +155,26 @@ class FaceRecognitionController(QObject):
             self._generation += 1
         self._wake.set()
 
+    def update_config(self, config: AppConfig) -> FaceRecognitionSettings:
+        """Replace the validated base config and apply its effective face settings."""
+
+        if not isinstance(config, AppConfig):
+            raise TypeError("config must be AppConfig")
+        settings = FaceRecognitionSettings.from_app_config(config)
+        enrollment = Path(config.storage.enrollment_dir).expanduser()
+        enrollment = (
+            enrollment
+            if enrollment.is_absolute()
+            else self._repo_root / enrollment
+        ).resolve()
+        with self._lock:
+            self._base_config = config
+            self._settings = settings
+            self._enrollment_root = enrollment
+            self._generation += 1
+        self._wake.set()
+        return settings
+
     def set_active_camera(
         self,
         camera_id: str | None,
