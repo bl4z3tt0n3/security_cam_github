@@ -745,10 +745,15 @@ class OpenVINOPersonDetector(PersonDetector):
                     self._predict_call(model, images[0])
                     self._retune_ultralytics_openvino(model)
                 if self._device_family(self._target_device) != "GPU":
-                    return [
-                        self._predict(image)
-                        for image in images
-                    ]
+                    sequential: list[Any] = []
+                    for image in images:
+                        one = list(self._predict(image))
+                        if len(one) != 1:
+                            raise PersonDetectionError(
+                                "OpenVINO CPU fallback returned an invalid single-frame result"
+                            )
+                        sequential.append(one[0])
+                    return sequential
                 results = self._predict_call(
                     model,
                     images,
