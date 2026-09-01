@@ -17,6 +17,7 @@ class ProviderSnapshot:
     worker: CameraWorkerSnapshot | None
     stream_info: StreamInfo | None
     last_error: str | None = None
+    hardware_acceleration: str | None = None
 
 
 class FrameProvider(Protocol):
@@ -106,4 +107,9 @@ class BackendFrameProvider:
             worker=worker_snapshot,
             stream_info=stream_info,
             last_error=worker_snapshot.last_error,
+            hardware_acceleration=getattr(
+                self._source,
+                "hardware_acceleration_used",
+                None,
+            ),
         )
