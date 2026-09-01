@@ -287,6 +287,104 @@ def _recommend_model(results: list[dict[str, Any]], count: int) -> dict[str, Any
     }
 
 
+def _model_performance_delta(
+    results: list[dict[str, Any]],
+    recommendation: dict[str, Any],
+) -> dict[str, Any] | None:
+    baseline = next(
+        (
+            row
+            for row in results
+            if row.get("candidate", {}).get("name") == "yolo26s-640-1stream"
+        ),
+        None,
+    )
+    chosen_candidate = recommendation.get("candidate")
+    if baseline is None or not isinstance(chosen_candidate, dict):
+        return None
+    chosen = next(
+        (row for row in results if row.get("candidate") == chosen_candidate),
+        None,
+    )
+    if chosen is None:
+        return None
+
+    baseline_raw = (baseline.get("raw_openvino") or {}).get("throughput_fps")
+    chosen_raw = (chosen.get("raw_openvino") or {}).get("throughput_fps")
+    baseline_e2e = (baseline.get("end_to_end") or {}).get("mean_ms")
+    chosen_e2e = (chosen.get("end_to_end") or {}).get("mean_ms")
+    result: dict[str, Any] = {
+        "baseline": "yolo26s-640-1stream",
+        "selected": chosen_candidate.get("name"),
+    }
+    if all(isinstance(value, (int, float)) and value > 0 for value in (baseline_raw, chosen_raw)):
+        result["aggregate_throughput_gain_percent"] = round(
+            (float(chosen_raw) / float(baseline_raw) - 1.0) * 100.0,
+            1,
+        )
+        result["aggregate_throughput_multiplier"] = round(
+            float(chosen_raw) / float(baseline_raw),
+            2,
+        )
+    if all(isinstance(value, (int, float)) and value > 0 for value in (baseline_e2e, chosen_e2e)):
+        result["single_call_latency_change_percent"] = round(
+            (float(chosen_e2e) / float(baseline_e2e) - 1.0) * 100.0,
+            1,
+        )
+    return result
+
+
+def _decode_performance_delta(
+    results: list[dict[str, Any]],
+    recommendation: dict[str, Any],
+) -> dict[str, Any] | None:
+    baseline = next(
+        (
+            row
+            for row in results
+            if row.get("requested") == "none"
+            and isinstance(row.get("decoded_fps"), (int, float))
+        ),
+        None,
+    )
+    selected_name = recommendation.get("requested")
+    selected = next(
+        (
+            row
+            for row in results
+            if row.get("requested") == selected_name
+            and row.get("actual") == selected_name
+        ),
+        None,
+    )
+    if baseline is None:
+        return None
+    if selected_name == "none":
+        selected = baseline
+    if selected is None:
+        return None
+
+    baseline_cpu = float(baseline.get("process_cpu_percent", 0.0))
+    selected_cpu = float(selected.get("process_cpu_percent", 0.0))
+    baseline_fps = float(baseline.get("decoded_fps", 0.0))
+    selected_fps = float(selected.get("decoded_fps", 0.0))
+    result: dict[str, Any] = {
+        "baseline": "software",
+        "selected": selected_name,
+    }
+    if baseline_cpu > 0:
+        result["process_cpu_reduction_percent"] = round(
+            (1.0 - selected_cpu / baseline_cpu) * 100.0,
+            1,
+        )
+    if baseline_fps > 0:
+        result["decoded_fps_change_percent"] = round(
+            (selected_fps / baseline_fps - 1.0) * 100.0,
+            1,
+        )
+    return result
+
+
 def _recommend_decode(results: list[dict[str, Any]]) -> dict[str, Any]:
     """Choose hardware decode only when it is actually used and does not regress FPS."""
 
@@ -547,6 +645,10 @@ def main() -> int:
             report["recommendation"] = _recommend_model(
                 report["model_benchmarks"], count
             )
+            report["model_performance_delta"] = _model_performance_delta(
+                report["model_benchmarks"],
+                report["recommendation"],
+            )
             decode_recommendation = None
             if args.benchmark_decode:
                 report["decode_benchmarks"] = _benchmark_decode(
@@ -554,6 +656,10 @@ def main() -> int:
                 )
                 decode_recommendation = _recommend_decode(report["decode_benchmarks"])
                 report["decode_recommendation"] = decode_recommendation
+                report["decode_performance_delta"] = _decode_performance_delta(
+                    report["decode_benchmarks"],
+                    decode_recommendation,
+                )
             if args.apply:
                 applied_path = _apply_recommendation(
                     config_path,
