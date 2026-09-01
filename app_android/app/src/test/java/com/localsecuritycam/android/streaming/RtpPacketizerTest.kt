@@ -40,9 +40,8 @@ class RtpPacketizerTest {
         assertEquals(65_535, units[0].sequenceNumber)
         assertEquals(0, units[1].sequenceNumber)
     }
-}
 
-@Test
+    @Test
     fun fragmentedPacketsReconstructOriginalNalPayload() {
         val nal = ByteArray(2_000) { index -> if (index == 0) 0x65 else (index and 0xff).toByte() }
         val packets = RtpPacketizer(mtu = 300, sequenceStart = 9)
@@ -58,3 +57,4 @@ class RtpPacketizerTest {
         assertEquals(9, packets.first().sequenceNumber)
         assertTrue(packets.last().marker)
     }
+}
