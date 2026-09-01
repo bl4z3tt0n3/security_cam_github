@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import threading
 from typing import Protocol
 
 from app.video.base import FramePacket, StreamInfo, VideoSource
@@ -72,6 +73,8 @@ class BackendFrameProvider:
             logger=self._logger,
         )
         self._start_calls = 0
+        self._latest_lock = threading.Lock()
+        self._latest_packet: FramePacket | None = None
 
     @property
     def worker(self) -> CameraWorker:
@@ -91,9 +94,18 @@ class BackendFrameProvider:
 
     def stop(self, timeout_s: float | None = None) -> None:
         self._worker.stop(timeout_s=timeout_s)
+        with self._latest_lock:
+            self._latest_packet = None
 
     def latest_frame(self) -> FramePacket | None:
-        return self._worker.get_latest(timeout_s=0.0)
+        # CameraMonitorController and inference are independent consumers. Keep
+        # one shared latest packet so whichever side drains CameraWorker first
+        # does not make the frame disappear for the other side.
+        packet = self._worker.get_latest(timeout_s=0.0)
+        with self._latest_lock:
+            if packet is not None:
+                self._latest_packet = packet
+            return self._latest_packet
 
     def status(self) -> ProviderSnapshot:
         """Return the non-blocking acquisition status for this camera."""
