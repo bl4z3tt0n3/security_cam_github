@@ -26,3 +26,20 @@ def test_log_event_redacts_url_fields(caplog) -> None:
 
     assert "password" not in caplog.text
     assert "user:***@camera" in caplog.text
+
+def test_log_event_does_not_redact_or_format_when_level_is_disabled(monkeypatch) -> None:
+    import app.logging_setup as logging_setup
+
+    logger = logging.getLogger("disabled-hot-path")
+    logger.setLevel(logging.INFO)
+    calls = 0
+
+    def unexpected_redaction(value: object) -> str:
+        nonlocal calls
+        calls += 1
+        return str(value)
+
+    monkeypatch.setattr(logging_setup, "redact_log_text", unexpected_redaction)
+    logging_setup.log_event(logger, logging.DEBUG, "frame", sequence=123, detail="ignored")
+
+    assert calls == 0
