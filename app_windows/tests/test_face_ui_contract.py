@@ -159,10 +159,16 @@ def test_bridge_threshold_update_distinguishes_missing_from_explicit_null() -> N
 
 
 def test_landmarker_selection_resolves_registry_path_and_rejects_unknown(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[2]
-    assert resolve_landmarker_model(LANDMARKER_SPEC.model_id, repo_root) == LANDMARKER_SPEC.relative_path
+    # Model binaries are intentionally not committed. Build a minimal local
+    # artifact pair so the contract test is hermetic on a clean Git clone.
+    xml_path = tmp_path / LANDMARKER_SPEC.relative_path
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    xml_path.write_text("<net/>", encoding="utf-8")
+    xml_path.with_suffix(".bin").write_bytes(b"weights")
+
+    assert resolve_landmarker_model(LANDMARKER_SPEC.model_id, tmp_path) == LANDMARKER_SPEC.relative_path
     with pytest.raises(ValueError, match="unsupported face landmarker"):
-        resolve_landmarker_model("unknown-landmarker", repo_root)
+        resolve_landmarker_model("unknown-landmarker", tmp_path)
 
 
 def test_enrollment_gallery_scan_handles_empty_multiple_invalid_and_active_rows(tmp_path: Path) -> None:
