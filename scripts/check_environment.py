@@ -1116,6 +1116,24 @@ def main() -> int:
         config = None
 
     if config is not None:
+        hardware = config.hardware_optimization
+        enabled_cameras = sum(1 for camera in config.cameras if camera.enabled)
+        _status(
+            "Hardware profile",
+            "OK" if hardware.enabled and hardware.profile == "intel_iris_xe" else "INFO",
+            (
+                f"profile={hardware.profile}; enabled={hardware.enabled}; "
+                f"cameras={enabled_cameras}; person={config.person_detection.model}@"
+                f"{config.person_detection.image_size}; "
+                f"person_fps={config.inference.person_detection_fps}; "
+                f"streams={config.person_detection.openvino_num_streams}; "
+                f"cpu_threads={config.person_detection.openvino_cpu_threads or 'auto'}; "
+                f"RAM_budget={config.person_detection.max_process_ram_mb or 'off'} MiB; "
+                f"decode={config.video.hardware_acceleration}"
+            ),
+            checks=environment_checks,
+            emit=emit,
+        )
         required_ok &= _check_person_detection(
             config,
             checks=environment_checks,
