@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -78,3 +80,38 @@ def test_onnx_embedder_rejects_output_dimension_mismatch(tmp_path: Path) -> None
     embedder = OnnxFaceEmbedder(tmp_path / "model.onnx", session=session)
     with pytest.raises(FaceEmbeddingError, match="dimension"):
         embedder.embed(np.zeros((112, 112, 3), dtype=np.uint8))
+
+def test_onnx_embedder_cpu_session_uses_bounded_threads(tmp_path: Path, monkeypatch) -> None:
+    model = tmp_path / "embedder.onnx"
+    model.write_bytes(b"onnx")
+    observed: dict[str, object] = {}
+
+    class Options:
+        intra_op_num_threads = 0
+        inter_op_num_threads = 0
+
+    def factory(path: str, **kwargs: object) -> FakeSession:
+        observed["path"] = path
+        observed.update(kwargs)
+        return FakeSession(np.array([[1, 2, 3, 4]], dtype=np.float32))
+
+    fake_ort = SimpleNamespace(
+        get_available_providers=lambda: ["CPUExecutionProvider"],
+        InferenceSession=factory,
+        SessionOptions=Options,
+    )
+    monkeypatch.setitem(sys.modules, "onnxruntime", fake_ort)
+
+    embedder = OnnxFaceEmbedder(
+        model,
+        device="cpu",
+        cpu_threads=4,
+        max_process_ram_mb=6144,
+    )
+
+    options = observed["sess_options"]
+    assert options.intra_op_num_threads == 4
+    assert options.inter_op_num_threads == 1
+    assert observed["providers"] == ["CPUExecutionProvider"]
+    assert embedder.provider_used == "CPUExecutionProvider"
+
