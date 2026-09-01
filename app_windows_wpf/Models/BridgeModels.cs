@@ -170,6 +170,9 @@ public sealed class SnapshotData
     [JsonPropertyName("codec")]
     public string? Codec { get; set; }
 
+    [JsonPropertyName("hardware_acceleration")]
+    public string? HardwareAcceleration { get; set; }
+
     [JsonPropertyName("dropped_frames")]
     public int DroppedFrames { get; set; }
 }
