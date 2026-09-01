@@ -19,6 +19,8 @@ from typing import Any
 import cv2
 import numpy as np
 
+from app.hardware import ensure_process_memory_budget, resolve_cpu_thread_budget
+
 
 CPU_PROVIDER = "CPUExecutionProvider"
 CUDA_PROVIDER = "CUDAExecutionProvider"
@@ -293,9 +295,13 @@ class OnnxFaceEmbedder(FaceEmbedder):
         default_threshold: float | None = None,
         session: Any | None = None,
         session_factory: Callable[..., Any] | None = None,
+        cpu_threads: int = 0,
+        max_process_ram_mb: int = 0,
     ) -> None:
         self._model_path = Path(model_path).expanduser()
         self._requested_device = _validate_device(device)
+        self._cpu_threads = int(cpu_threads)
+        self._max_process_ram_mb = int(max_process_ram_mb)
         if session is None and not self._model_path.is_file():
             raise FaceEmbeddingError(f"face embedding model not found: {self._model_path}")
 
@@ -306,7 +312,21 @@ class OnnxFaceEmbedder(FaceEmbedder):
                 available = tuple(ort.get_available_providers())
                 provider = _select_provider(self._requested_device, available)
                 factory = session_factory or ort.InferenceSession
-                session = factory(str(self._model_path), providers=[provider])
+                kwargs: dict[str, Any] = {"providers": [provider]}
+                if provider == CPU_PROVIDER:
+                    ensure_process_memory_budget(
+                        self._max_process_ram_mb,
+                        stage="face embedding ONNX Runtime load",
+                    )
+                    options = ort.SessionOptions()
+                    options.intra_op_num_threads = resolve_cpu_thread_budget(self._cpu_threads)
+                    options.inter_op_num_threads = 1
+                    kwargs["sess_options"] = options
+                try:
+                    session = factory(str(self._model_path), **kwargs)
+                except TypeError:
+                    kwargs.pop("sess_options", None)
+                    session = factory(str(self._model_path), **kwargs)
             else:
                 available = tuple(getattr(session, "get_providers", lambda: ())())
                 provider = _select_provider(self._requested_device, available)
