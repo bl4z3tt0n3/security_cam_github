@@ -8,8 +8,11 @@ from typing import Any
 import numpy as np
 import pytest
 
+from app.config import VideoConfig
 from app.video.base import ReadStatus, VideoSourceError, redact_url
+from app.video.factory import create_opencv_source
 from app.video.fake_source import FakeVideoSource
+import app.video.opencv_source as opencv_module
 from app.video.opencv_source import OpenCVVideoSource, cv2
 
 
@@ -424,3 +427,69 @@ def test_rtsp_transport_does_not_modify_non_rtsp_capture(monkeypatch) -> None:
 
     assert seen_options == ["custom;value"]
     assert os.environ[option_name] == "custom;value"
+
+def test_video_factory_carries_hardware_acceleration_setting() -> None:
+    source = create_opencv_source(
+        "rtsp://camera.local/live",
+        video=VideoConfig(hardware_acceleration="mfx"),
+    )
+    assert source.hardware_acceleration == "mfx"
+
+
+def test_invalid_hardware_acceleration_is_rejected() -> None:
+    with pytest.raises(ValueError, match="hardware_acceleration"):
+        OpenCVVideoSource(
+            "rtsp://camera.local/live",
+            hardware_acceleration="invalid",
+        )
+
+
+def test_default_capture_factory_falls_back_from_mfx_to_software(monkeypatch) -> None:
+    class Capture:
+        def __init__(self, opened: bool) -> None:
+            self.opened = opened
+            self.released = False
+
+        def isOpened(self) -> bool:
+            return self.opened
+
+        def release(self) -> None:
+            self.released = True
+
+    class FakeCv2:
+        CAP_FFMPEG = 1900
+        CAP_PROP_HW_ACCELERATION = 50
+        VIDEO_ACCELERATION_NONE = 0
+        VIDEO_ACCELERATION_ANY = 1
+        VIDEO_ACCELERATION_D3D11 = 2
+        VIDEO_ACCELERATION_MFX = 4
+        error = RuntimeError
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+            self.hardware_capture = Capture(False)
+            self.software_capture = Capture(True)
+
+        def VideoCapture(self, url: str, *args: object) -> Capture:
+            self.calls.append((url, *args))
+            if len(args) == 2:
+                return self.hardware_capture
+            return self.software_capture
+
+    fake = FakeCv2()
+    monkeypatch.setattr(opencv_module, "cv2", fake)
+
+    capture = opencv_module._default_capture_factory(
+        "rtsp://camera.local/live",
+        "auto",
+        "mfx",
+    )
+
+    assert capture is fake.software_capture
+    assert fake.hardware_capture.released is True
+    assert fake.calls[0][1:] == (
+        fake.CAP_FFMPEG,
+        [fake.CAP_PROP_HW_ACCELERATION, fake.VIDEO_ACCELERATION_MFX],
+    )
+    assert fake.calls[1][1:] == (fake.CAP_FFMPEG,)
+
