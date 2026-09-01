@@ -5,5 +5,11 @@ from .person_detection_controller import (
     PersonDetectionController,
 )
 from .face_recognition_controller import FaceRecognitionController
+from .person_detection_fleet_controller import FleetPersonDetectionController
 
-__all__ = ["FaceRecognitionController", "InferenceFrameSource", "PersonDetectionController"]
+__all__ = [
+    "FaceRecognitionController",
+    "FleetPersonDetectionController",
+    "InferenceFrameSource",
+    "PersonDetectionController",
+]
