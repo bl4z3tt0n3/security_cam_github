@@ -20,6 +20,7 @@ from pathlib import Path
 import queue
 import sys
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -220,6 +221,8 @@ class BridgeRuntime(QObject):
         self._write_lock = threading.Lock()
         self._stopping = False
         self._frame_publishers: dict[str, SharedFramePublisher] = {}
+        self._active_camera_id: str | None = None
+        self._last_preview_publish: dict[str, float] = {}
         self._last_snapshot_key: dict[str, tuple[Any, ...]] = {}
 
         self._prepare_backend()
@@ -460,6 +463,9 @@ class BridgeRuntime(QObject):
         ):
             raise ValueError(f"camera '{normalized}' non disponibile")
         provider = self._controller.provider_for(normalized) if normalized else None
+        self._active_camera_id = normalized
+        if normalized is not None:
+            self._last_preview_publish.pop(normalized, None)
         self._person_controller.set_active_camera(normalized, provider)
         self._face_controller.set_active_camera(normalized, provider)
         self._emit("active_camera", {"camera_id": normalized})
@@ -810,13 +816,18 @@ class BridgeRuntime(QObject):
                 else 0
             ),
         }
-        if packet is not None:
+        if packet is not None and self._preview_due(camera_id):
             try:
                 publisher = self._frame_publishers.get(camera_id)
                 if publisher is None:
                     publisher = SharedFramePublisher(camera_id)
                     self._frame_publishers[camera_id] = publisher
-                payload.update(publisher.publish(packet.sequence, packet.frame))
+                frame = (
+                    packet.frame
+                    if camera_id == self._active_camera_id
+                    else self._thumbnail_frame(packet.frame)
+                )
+                payload.update(publisher.publish(packet.sequence, frame))
             except Exception as exc:
                 self._logger.warning(
                     "camera=%s shared preview publish failed: %s",
@@ -824,6 +835,34 @@ class BridgeRuntime(QObject):
                     redact_log_text(exc),
                 )
         self._emit("snapshot", payload)
+
+    def _preview_due(self, camera_id: str) -> bool:
+        """Keep focus preview at UI FPS while throttling background tiles."""
+
+        now = time.monotonic()
+        if camera_id == self._active_camera_id:
+            self._last_preview_publish[camera_id] = now
+            return True
+        previous = self._last_preview_publish.get(camera_id, 0.0)
+        if now - previous < 0.2:  # 5 FPS is enough for small grid tiles.
+            return False
+        self._last_preview_publish[camera_id] = now
+        return True
+
+    @staticmethod
+    def _thumbnail_frame(frame: Any, max_width: int = 480) -> Any:
+        image = np.asarray(frame)
+        if image.ndim != 3 or image.shape[1] <= max_width:
+            return image
+        try:
+            import cv2
+
+            width = max_width
+            height = max(1, int(round(image.shape[0] * width / image.shape[1])))
+            return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+        except Exception:
+            # Preview optimization must never break camera status delivery.
+            return image
 
     @Slot(object)
     def _on_person_snapshot(self, value: object) -> None:
