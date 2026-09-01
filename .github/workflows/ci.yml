@@ -36,6 +36,8 @@ jobs:
         run: pytest
       - name: Scalability smoke benchmark
         run: python scripts/benchmark_scalability.py --mode fake --max-cameras 4 --duration 0.2 --warmup 0 --scenario one_person --parallel-inference 2 --fake-inference-ms 1 --json > scalability-smoke.json
+      - name: Intel hardware profile plan
+        run: python scripts/benchmark_intel_hardware.py --config config/config.example.yaml --camera-count 6 --json > intel-profile-plan.json
 
   python-windows:
     name: Windows bridge contract
