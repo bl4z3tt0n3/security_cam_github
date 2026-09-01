@@ -531,6 +531,7 @@ class OpenCVVideoSource(VideoSource):
 
     def _reader_loop(self, capture: Any, generation: int) -> None:
         reader_thread_id = threading.get_ident()
+        debug_frames = self._logger.isEnabledFor(logging.DEBUG)
         exit_reason = "stop_event"
         log_event(
             self._logger,
@@ -547,13 +548,14 @@ class OpenCVVideoSource(VideoSource):
                         break
 
                 started = time.perf_counter()
-                log_event(
-                    self._logger,
-                    logging.DEBUG,
-                    "source_capture_read_start",
-                    generation=generation,
-                    reader_thread_id=reader_thread_id,
-                )
+                if debug_frames:
+                    log_event(
+                        self._logger,
+                        logging.DEBUG,
+                        "source_capture_read_start",
+                        generation=generation,
+                        reader_thread_id=reader_thread_id,
+                    )
                 try:
                     ok, frame = capture.read()
                 except Exception as exc:
@@ -599,17 +601,18 @@ class OpenCVVideoSource(VideoSource):
                     and isinstance(frame, np.ndarray)
                     and frame.size > 0
                 )
-                log_event(
-                    self._logger,
-                    logging.DEBUG,
-                    "source_capture_read_result",
-                    generation=generation,
-                    reader_thread_id=reader_thread_id,
-                    result="frame" if frame_valid else "no_frame",
-                    ok=ok,
-                    frame_valid=frame_valid,
-                    read_duration_ms=f"{read_duration_ms:.1f}",
-                )
+                if debug_frames:
+                    log_event(
+                        self._logger,
+                        logging.DEBUG,
+                        "source_capture_read_result",
+                        generation=generation,
+                        reader_thread_id=reader_thread_id,
+                        result="frame" if frame_valid else "no_frame",
+                        ok=ok,
+                        frame_valid=frame_valid,
+                        read_duration_ms=f"{read_duration_ms:.1f}",
+                    )
 
                 if self._stop_event.is_set():
                     exit_reason = "stop_event"
@@ -677,25 +680,26 @@ class OpenCVVideoSource(VideoSource):
                             dropped += 1
                     buffer_size = self._queue.qsize()
 
-                log_event(
-                    self._logger,
-                    logging.DEBUG,
-                    "source_frame_received",
-                    generation=generation,
-                    reader_thread_id=reader_thread_id,
-                    sequence=sequence,
-                )
-                log_event(
-                    self._logger,
-                    logging.DEBUG,
-                    "source_frame_published",
-                    generation=generation,
-                    reader_thread_id=reader_thread_id,
-                    sequence=sequence,
-                    buffer_size=buffer_size,
-                    dropped=dropped,
-                    frame_age="0.000s",
-                )
+                if debug_frames:
+                    log_event(
+                        self._logger,
+                        logging.DEBUG,
+                        "source_frame_received",
+                        generation=generation,
+                        reader_thread_id=reader_thread_id,
+                        sequence=sequence,
+                    )
+                    log_event(
+                        self._logger,
+                        logging.DEBUG,
+                        "source_frame_published",
+                        generation=generation,
+                        reader_thread_id=reader_thread_id,
+                        sequence=sequence,
+                        buffer_size=buffer_size,
+                        dropped=dropped,
+                        frame_age="0.000s",
+                    )
         finally:
             with self._state_lock:
                 if (
