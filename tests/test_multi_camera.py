@@ -450,3 +450,49 @@ def test_shared_event_manager_keeps_camera_cooldowns_independent(tmp_path: Path)
 
     assert duplicate.confirmed is True
     assert len(list((tmp_path / "events").rglob("metadata.json"))) == 2
+
+def test_concurrent_safe_detector_uses_parallel_inference_gate() -> None:
+    active = 0
+    maximum_active = 0
+    calls = 0
+    state_lock = threading.Lock()
+
+    class ConcurrentFakeDetector(FakePersonDetector):
+        @property
+        def supports_concurrent_inference(self) -> bool:
+            return True
+
+    def detect(frame: np.ndarray) -> list[PersonDetection]:
+        del frame
+        nonlocal active, maximum_active, calls
+        with state_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+            calls += 1
+        time.sleep(0.02)
+        with state_lock:
+            active -= 1
+        return []
+
+    runtimes = [
+        CameraRuntime(
+            f"parallel_{index}",
+            FakeVideoSource(
+                [np.full((8, 8, 3), index, dtype=np.uint8)],
+                read_delay_s=0.001,
+            ),
+            target_fps=30.0,
+            read_timeout_s=0.05,
+            reconnect_delay_s=0.0,
+        )
+        for index in (1, 2)
+    ]
+    fleet = MultiCameraRuntime(runtimes, detector=ConcurrentFakeDetector(callback=detect))
+
+    assert fleet.inference_gate.max_parallel == 2
+    fleet.start()
+    try:
+        assert wait_until(lambda: calls >= 4)
+        assert maximum_active >= 2
+    finally:
+        fleet.stop(timeout_s=1.0)
