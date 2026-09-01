@@ -188,11 +188,16 @@ class OpenVINOFaceEmbedder(FaceEmbedder):
                 f"unsupported OpenVINO normalization: {normalization}"
             )
 
-        # OpenCV performs resize, float conversion, optional BGR->RGB,
-        # mean/scale and NHWC->NCHW in one native pipeline instead of creating
-        # several Python-visible full-image temporaries.
-        return cv2.dnn.blobFromImage(
+        # Keep the historical INTER_AREA resize so existing enrollment
+        # embeddings retain the exact preprocessing contract. Then fuse float
+        # conversion, optional BGR->RGB, normalization and NHWC->NCHW.
+        resized = cv2.resize(
             value,
+            (self._input_width, self._input_height),
+            interpolation=cv2.INTER_AREA,
+        )
+        return cv2.dnn.blobFromImage(
+            resized,
             scalefactor=scale,
             size=(self._input_width, self._input_height),
             mean=mean,
