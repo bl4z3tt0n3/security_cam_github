@@ -172,18 +172,33 @@ class OpenVINOFaceEmbedder(FaceEmbedder):
             value = cv2.cvtColor(value, cv2.COLOR_GRAY2BGR)
         if value.ndim != 3 or value.shape[2] != 3 or value.size == 0:
             raise FaceEmbeddingError("face image must be a non-empty three-channel image")
-        resized = cv2.resize(value, (self._input_width, self._input_height), interpolation=cv2.INTER_AREA)
-        ordered = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB) if self._color_order.upper() == "RGB" else resized
-        values = ordered.astype(np.float32)
-        if self._normalization == "arcface_127.5_127.5":
-            values = (values - 127.5) / 127.5
-        elif self._normalization in {"none", "openvino_raw_bgr"}:
-            pass
-        elif self._normalization in {"arcface_127.5_128", "facenet_fixed_standardization"}:
-            values = (values - 127.5) / 128.0
+
+        normalization = self._normalization
+        if normalization == "arcface_127.5_127.5":
+            scale = 1.0 / 127.5
+            mean = (127.5, 127.5, 127.5)
+        elif normalization in {"arcface_127.5_128", "facenet_fixed_standardization"}:
+            scale = 1.0 / 128.0
+            mean = (127.5, 127.5, 127.5)
+        elif normalization in {"none", "openvino_raw_bgr"}:
+            scale = 1.0
+            mean = (0.0, 0.0, 0.0)
         else:
-            raise FaceEmbeddingError(f"unsupported OpenVINO normalization: {self._normalization}")
-        return np.transpose(values, (2, 0, 1))[None, ...]
+            raise FaceEmbeddingError(
+                f"unsupported OpenVINO normalization: {normalization}"
+            )
+
+        # OpenCV performs resize, float conversion, optional BGR->RGB,
+        # mean/scale and NHWC->NCHW in one native pipeline instead of creating
+        # several Python-visible full-image temporaries.
+        return cv2.dnn.blobFromImage(
+            value,
+            scalefactor=scale,
+            size=(self._input_width, self._input_height),
+            mean=mean,
+            swapRB=self._color_order.upper() == "RGB",
+            crop=False,
+        )
 
     def embed(self, face_image: np.ndarray) -> np.ndarray:
         if self._compiled is None:
