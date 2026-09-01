@@ -126,7 +126,23 @@ def _safe_capture_get(capture: Any, property_id: int, default: float | None = No
     return value if np.isfinite(value) else default
 
 
-def _default_capture_factory(url: str, backend: str) -> Any:
+def _hardware_acceleration_value(name: str) -> int | None:
+    if cv2 is None:
+        return None
+    values = {
+        "none": getattr(cv2, "VIDEO_ACCELERATION_NONE", None),
+        "auto": getattr(cv2, "VIDEO_ACCELERATION_ANY", None),
+        "d3d11": getattr(cv2, "VIDEO_ACCELERATION_D3D11", None),
+        "mfx": getattr(cv2, "VIDEO_ACCELERATION_MFX", None),
+    }
+    return values.get(name)
+
+
+def _default_capture_factory(
+    url: str,
+    backend: str,
+    hardware_acceleration: str = "none",
+) -> Any:
     if cv2 is None:
         raise VideoSourceError(
             "OpenCV is not installed; run 'python -m pip install -e .[dev]'",
@@ -134,6 +150,27 @@ def _default_capture_factory(url: str, backend: str) -> Any:
         )
 
     if backend in {"auto", "ffmpeg"} and hasattr(cv2, "CAP_FFMPEG"):
+        acceleration = _hardware_acceleration_value(hardware_acceleration)
+        prop = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
+        if (
+            hardware_acceleration != "none"
+            and acceleration is not None
+            and prop is not None
+        ):
+            try:
+                capture = cv2.VideoCapture(
+                    url,
+                    cv2.CAP_FFMPEG,
+                    [int(prop), int(acceleration)],
+                )
+                if capture.isOpened():
+                    return capture
+                capture.release()
+            except (TypeError, cv2.error):
+                # Hardware acceleration is an optional optimization. Retry the
+                # same FFmpeg stream in software before changing backends.
+                pass
+
         capture = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         if capture.isOpened() or backend == "ffmpeg":
             return capture
@@ -154,6 +191,7 @@ class OpenCVVideoSource(VideoSource):
         open_timeout_s: float = 5.0,
         read_timeout_s: float = 3.0,
         max_buffer_frames: int = 1,
+        hardware_acceleration: str = "none",
         capture_factory: CaptureFactory | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -167,6 +205,11 @@ class OpenCVVideoSource(VideoSource):
             raise ValueError("source timeouts must be greater than zero")
         if max_buffer_frames < 1:
             raise ValueError("max_buffer_frames must be at least one")
+        normalized_hw = str(hardware_acceleration).strip().lower()
+        if normalized_hw not in {"none", "auto", "d3d11", "mfx"}:
+            raise ValueError(
+                "hardware_acceleration must be one of: none, auto, d3d11, mfx"
+            )
 
         self._url = url.strip()
         self._backend = backend
@@ -174,7 +217,16 @@ class OpenCVVideoSource(VideoSource):
         self._open_timeout_s = open_timeout_s
         self._read_timeout_s = read_timeout_s
         self._max_buffer_frames = max_buffer_frames
-        self._capture_factory = capture_factory or _default_capture_factory
+        self._hardware_acceleration = normalized_hw
+        self._capture_factory = (
+            capture_factory
+            if capture_factory is not None
+            else lambda source_url, source_backend: _default_capture_factory(
+                source_url,
+                source_backend,
+                self._hardware_acceleration,
+            )
+        )
         self._logger = logger or logging.getLogger(__name__)
 
         self._capture: Any | None = None
@@ -210,6 +262,10 @@ class OpenCVVideoSource(VideoSource):
             return self._reconnect_count
 
     @property
+    def hardware_acceleration(self) -> str:
+        return self._hardware_acceleration
+
+    @property
     def is_connected(self) -> bool:
         with self._state_lock:
             return self._connected
@@ -228,6 +284,7 @@ class OpenCVVideoSource(VideoSource):
             logging.DEBUG,
             "source_open_start",
             generation=generation,
+            hardware_acceleration=self._hardware_acceleration,
         )
         capture = self._create_capture_with_timeout()
 
