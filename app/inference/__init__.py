@@ -12,7 +12,7 @@ from .prompts import normalize_prompts
 from .onnx import OnnxPersonDetector
 from .openvino import OpenVINOPersonDetector
 from .yoloe import YoloEPersonDetector
-from .synchronization import InferenceGate, SynchronizedPersonDetector
+from .synchronization import BatchingPersonDetector, InferenceGate, SynchronizedPersonDetector
 from .yoloe import YoloESegmentationDetector
 
 __all__ = [
@@ -25,6 +25,7 @@ __all__ = [
     "PersonDetection",
     "PersonDetectionError",
     "PersonDetector",
+    "BatchingPersonDetector",
     "InferenceGate",
     "SynchronizedPersonDetector",
     "create_person_detector",
