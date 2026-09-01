@@ -44,6 +44,12 @@ def configure_logging(level: str = "INFO") -> None:
 def log_event(logger: logging.Logger, level: int, event: str, **fields: Any) -> None:
     """Emit a compact key=value event suitable for console diagnostics."""
 
+    # Redaction is intentionally skipped when the event would be discarded.
+    # This function is used in per-frame hot paths, so eagerly formatting DEBUG
+    # events would otherwise pay regex/string costs even at INFO level.
+    if not logger.isEnabledFor(level):
+        return
+
     parts = [f"event={event}"]
     for key, value in fields.items():
         parts.append(f"{key}={redact_log_text(value)}")
