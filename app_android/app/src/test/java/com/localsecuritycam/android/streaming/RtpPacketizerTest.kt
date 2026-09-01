@@ -41,3 +41,20 @@ class RtpPacketizerTest {
         assertEquals(0, units[1].sequenceNumber)
     }
 }
+
+@Test
+    fun fragmentedPacketsReconstructOriginalNalPayload() {
+        val nal = ByteArray(2_000) { index -> if (index == 0) 0x65 else (index and 0xff).toByte() }
+        val packets = RtpPacketizer(mtu = 300, sequenceStart = 9)
+            .packetize(EncodedAccessUnit(listOf(nal), 2_000, true))
+
+        val reconstructed = ArrayList<Byte>()
+        reconstructed += nal[0]
+        packets.forEach { packet ->
+            packet.bytes.copyOfRange(14, packet.bytes.size).forEach { reconstructed += it }
+        }
+
+        assertEquals(nal.toList(), reconstructed)
+        assertEquals(9, packets.first().sequenceNumber)
+        assertTrue(packets.last().marker)
+    }
