@@ -105,6 +105,11 @@ def create_person_detector(
             fallback_device=config.fallback_device,
             classes=config.classes,
             image_size=config.image_size,
+            performance_mode=config.openvino_performance_mode,
+            num_streams=config.openvino_num_streams,
+            num_requests=config.openvino_num_requests,
+            cpu_threads=config.openvino_cpu_threads,
+            max_process_ram_mb=config.max_process_ram_mb,
             model_root=model_root,
         )
     raise ValueError(f"unsupported person detection backend: {backend}")
