@@ -445,6 +445,7 @@ class CameraMonitorController(QObject):
             worker_snapshot=worker,
             last_frame_age_s=age,
             display_fps=self._display_fps,
+            hardware_acceleration=provider_snapshot.hardware_acceleration,
         )
 
     def _publish(self, snapshot: CameraViewSnapshot) -> None:
