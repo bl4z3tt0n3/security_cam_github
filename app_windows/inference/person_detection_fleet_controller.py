@@ -126,6 +126,8 @@ class FleetPersonDetectionController(QObject):
         if not isinstance(settings, PersonDetectionSettings):
             raise TypeError("settings must be PersonDetectionSettings")
         with self._lock:
+            if settings == self._settings:
+                return
             self._settings = settings
             self._settings_generation += 1
         self._wake.set()
