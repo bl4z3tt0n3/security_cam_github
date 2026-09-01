@@ -307,3 +307,93 @@ def test_openvino_execution_device_is_verified_once_per_loaded_model(tmp_path: P
     assert detector.device_verified is True
     runtime = next(item for item in created if isinstance(item, FakeRuntimeModel))
     assert len(runtime.predict_calls) == 2
+
+def test_openvino_iris_xe_tuning_recompiles_backend_and_batches_frames(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "models" / "yolo26s.pt"
+    checkpoint.parent.mkdir()
+    checkpoint.write_bytes(b"checkpoint")
+    cache = checkpoint.with_name("yolo26s_openvino_model")
+    _write_valid_cache(cache)
+
+    class FakeInput:
+        def get_any_name(self) -> str:
+            return "images"
+
+    class FakeCompiled:
+        def input(self) -> FakeInput:
+            return FakeInput()
+
+        def get_property(self, name: str):
+            assert name == "EXECUTION_DEVICES"
+            return ["GPU.0"]
+
+    class TunableCore:
+        def __init__(self) -> None:
+            self.available_devices = ["CPU", "GPU.0"]
+            self.compile_calls: list[tuple[object, str, dict[str, object]]] = []
+
+        def read_model(self, path: str) -> object:
+            assert Path(path).suffix == ".xml"
+            return object()
+
+        def compile_model(
+            self,
+            model: object,
+            device: str,
+            config: dict[str, object],
+        ) -> FakeCompiled:
+            self.compile_calls.append((model, device, dict(config)))
+            return FakeCompiled()
+
+    class Backend:
+        def __init__(self) -> None:
+            self.ov_compiled_model = FakeCompiled()
+            self.input_name = "images"
+            self.inference_mode = "LATENCY"
+            self.compile_model = None
+
+    class Predictor:
+        def __init__(self, backend: Backend) -> None:
+            self.model = backend
+
+    class TunableRuntime(FakeRuntimeModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.backend = Backend()
+            self.predictor = Predictor(self.backend)
+
+        def predict(self, **kwargs: object) -> list[object]:
+            self.predict_calls.append(kwargs)
+            source = kwargs["source"]
+            count = len(source) if isinstance(source, list) else 1
+            return [SimpleNamespace(boxes=FakeBoxes()) for _ in range(count)]
+
+    core = TunableCore()
+    runtime = TunableRuntime()
+
+    detector = OpenVINOPersonDetector(
+        checkpoint,
+        device="gpu",
+        performance_mode="throughput",
+        num_streams=2,
+        num_requests=2,
+        model_root=tmp_path,
+        core_factory=lambda: core,
+        yolo_factory=lambda _path, **_kwargs: runtime,
+    )
+
+    frame = np.zeros((10, 12, 3), dtype=np.uint8)
+    results = detector.detect_batch([frame, frame], [None, None])
+
+    assert len(results) == 2
+    assert detector.runtime_tuned is True
+    assert detector.runtime_tuning == {"NUM_STREAMS": 2}
+    assert detector.supports_batch_inference is True
+    assert detector.preferred_batch_size == 2
+    assert core.compile_calls
+    assert core.compile_calls[-1][1] == "GPU.0"
+    assert core.compile_calls[-1][2] == {"NUM_STREAMS": 2}
+    assert runtime.backend.inference_mode == "THROUGHPUT"
+    assert runtime.predict_calls[-1]["batch"] == 2
+    assert isinstance(runtime.predict_calls[-1]["source"], list)
+
