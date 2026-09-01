@@ -11,8 +11,9 @@ from typing import Any, Protocol
 
 from app.config import TrackingConfig
 from app.inference import (
-    PersonDetector,
+    BatchingPersonDetector,
     InferenceGate,
+    PersonDetector,
     SynchronizedPersonDetector,
 )
 from app.metrics import CameraMetrics, CameraMetricsSnapshot
