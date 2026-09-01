@@ -9,13 +9,13 @@ import pytest
 from app.face import capabilities as face_capabilities
 from app.face.capabilities import FaceCapability
 from app.face.registry import FACE_DETECTOR_SPECS, RECOGNIZER_SPECS
-from app_windows.wpf_bridge import (
+from app_windows.shared_preview import (
+    FRAME_HEADER,
+    FRAME_MAGIC,
+    FRAME_VERSION,
     SharedFramePublisher,
-    _FRAME_HEADER,
-    _FRAME_MAGIC,
-    _FRAME_VERSION,
-    face_capability_rows,
 )
+from app_windows.wpf_bridge import face_capability_rows
 
 
 def test_face_capability_rows_serializes_dataclasses_for_wpf() -> None:
@@ -106,18 +106,18 @@ def test_shared_frame_publisher_exposes_consistent_raw_bgr_frame() -> None:
         byte_count = metadata["frame_byte_count"]
         with mmap.mmap(
             -1,
-            _FRAME_HEADER.size + byte_count,
+            FRAME_HEADER.size + byte_count,
             tagname=metadata["frame_shm_name"],
             access=mmap.ACCESS_READ,
         ) as view:
-            header = _FRAME_HEADER.unpack_from(view, 0)
+            header = FRAME_HEADER.unpack_from(view, 0)
             magic, version, epoch, sequence, width, height, stride, stored_bytes = header
-            assert magic == _FRAME_MAGIC
-            assert version == _FRAME_VERSION
+            assert magic == FRAME_MAGIC
+            assert version == FRAME_VERSION
             assert epoch % 2 == 0
             assert sequence == 17
             assert (width, height, stride, stored_bytes) == (5, 4, 15, 60)
-            view.seek(_FRAME_HEADER.size)
+            view.seek(FRAME_HEADER.size)
             assert view.read(stored_bytes) == frame.tobytes()
     finally:
         publisher.close()
