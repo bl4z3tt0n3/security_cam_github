@@ -60,6 +60,7 @@ class VideoConfig(BaseModel):
     max_reconnect_attempts: int = Field(default=0, ge=0, le=100)
     max_buffer_frames: int = Field(default=1, ge=1, le=10)
     backend: Literal["auto", "opencv", "ffmpeg"] = "auto"
+    hardware_acceleration: Literal["none", "auto", "d3d11", "mfx"] = "none"
 
 
 class InferenceConfig(BaseModel):
