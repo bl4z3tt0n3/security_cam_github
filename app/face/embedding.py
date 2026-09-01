@@ -422,23 +422,28 @@ class OnnxFaceEmbedder(FaceEmbedder):
         if image.ndim != 3 or image.shape[2] != 3 or image.size == 0:
             raise FaceEmbeddingError("face image must be a non-empty BGR or grayscale image")
         resized = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
-        ordered = (
-            cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-            if self.metadata.color_order.upper() == "RGB"
-            else resized
-        )
-        values = ordered.astype(np.float32)
-        if self.metadata.normalization in {"arcface_127.5_128", "facenet_fixed_standardization"}:
-            normalized = (values - 127.5) / 128.0
-        elif self.metadata.normalization == "arcface_127.5_127.5":
-            normalized = (values - 127.5) / 127.5
-        elif self.metadata.normalization in {"none", "openvino_raw_bgr"}:
-            normalized = values
+        normalization = self.metadata.normalization
+        if normalization in {"arcface_127.5_128", "facenet_fixed_standardization"}:
+            scale = 1.0 / 128.0
+            mean = (127.5, 127.5, 127.5)
+        elif normalization == "arcface_127.5_127.5":
+            scale = 1.0 / 127.5
+            mean = (127.5, 127.5, 127.5)
+        elif normalization in {"none", "openvino_raw_bgr"}:
+            scale = 1.0
+            mean = (0.0, 0.0, 0.0)
         else:
             raise FaceEmbeddingError(
-                f"unsupported face embedding normalization: {self.metadata.normalization}"
+                f"unsupported face embedding normalization: {normalization}"
             )
-        return np.transpose(normalized, (2, 0, 1))[None, ...]
+        return cv2.dnn.blobFromImage(
+            resized,
+            scalefactor=scale,
+            size=(width, height),
+            mean=mean,
+            swapRB=self.metadata.color_order.upper() == "RGB",
+            crop=False,
+        )
 
     def embed(self, face_image: np.ndarray) -> np.ndarray:
         tensor = self._preprocess(
