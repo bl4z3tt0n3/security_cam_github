@@ -744,6 +744,7 @@ class BridgeRuntime(QObject):
             "stream_width": snapshot.stream_info.width if snapshot.stream_info else None,
             "stream_height": snapshot.stream_info.height if snapshot.stream_info else None,
             "codec": snapshot.stream_info.codec if snapshot.stream_info else None,
+            "hardware_acceleration": snapshot.hardware_acceleration,
             "dropped_frames": (
                 snapshot.worker_snapshot.dropped_frames
                 if snapshot.worker_snapshot is not None
@@ -784,7 +785,6 @@ class BridgeRuntime(QObject):
         self._last_preview_publish[camera_id] = now
         return True
 
-    @staticmethod
     def _thumbnail_frame(self, frame: Any) -> Any:
         image = np.asarray(frame)
         max_width = int(self._config.windows_ui.background_preview_max_width)
