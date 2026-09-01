@@ -137,8 +137,6 @@ class FleetFaceRecognitionController(FaceRecognitionController):
             return
         with self._lock:
             self._person_by_camera[camera_id] = value
-            if value.tracking_pipeline is not None:
-                self._pipelines_by_camera[camera_id] = value.tracking_pipeline
             if camera_id == self._camera_id:
                 self._person_snapshot = value
                 self._tracking_pipeline = value.tracking_pipeline
