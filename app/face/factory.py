@@ -108,8 +108,6 @@ def create_face_detector(
             confidence_threshold=config.confidence_threshold,
             nms_threshold=config.nms_threshold,
             device=effective_device,
-            cpu_threads=config.openvino_cpu_threads,
-            max_process_ram_mb=config.max_process_ram_mb,
         )
     if detector_id == "face_detection_0205" and backend == "openvino":
         return OpenVINOFaceDetector0205(
