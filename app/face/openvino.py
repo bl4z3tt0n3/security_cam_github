@@ -38,8 +38,14 @@ class OpenVINOFaceEmbedder(FaceEmbedder):
         compiled_model: Any | None = None,
         core: Any | None = None,
         cache_dir: Path | None = None,
+        performance_mode: str = "latency",
+        cpu_threads: int = 0,
+        max_process_ram_mb: int = 0,
     ) -> None:
         self._model_path = Path(model_path).expanduser()
+        self._performance_mode = str(performance_mode).strip().lower()
+        self._cpu_threads = int(cpu_threads)
+        self._max_process_ram_mb = int(max_process_ram_mb)
         self._spec = spec
         self._requested_device = str(device).strip().lower()
         if self._requested_device not in {"auto", "cpu", "gpu", "npu"}:
@@ -95,6 +101,9 @@ class OpenVINOFaceEmbedder(FaceEmbedder):
                 model_id=self._model_id,
                 model_sha256=artifact_sha256(model_path),
                 cache_root=self._cache_dir,
+                performance_mode=self._performance_mode,
+                cpu_threads=self._cpu_threads,
+                max_process_ram_mb=self._max_process_ram_mb,
             )
             self._inspect_compiled(self._compiled, fallback_device=requested.lower())
         except FaceEmbeddingError:
