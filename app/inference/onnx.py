@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from pathlib import Path
 import math
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -65,6 +66,9 @@ class OnnxPersonDetector(PersonDetector):
         actual_provider = self._get_actual_provider(session, provider)
         self._provider_used = actual_provider
         self._device_used = "cuda" if actual_provider == CUDA_PROVIDER else "cpu"
+        # Thread-local scratch preserves concurrent ONNX Runtime calls while
+        # avoiding a fresh letterbox canvas allocation on every frame.
+        self._scratch = threading.local()
 
     @staticmethod
     def _validate_threshold(value: float) -> float:
@@ -165,6 +169,12 @@ class OnnxPersonDetector(PersonDetector):
     def device_verified(self) -> bool:
         return True
 
+    @property
+    def supports_concurrent_inference(self) -> bool:
+        # ONNX Runtime sessions permit concurrent Run calls and preprocessing
+        # scratch is thread-local.
+        return True
+
     def detect(
         self,
         frame: np.ndarray,
@@ -236,18 +246,30 @@ class OnnxPersonDetector(PersonDetector):
         resized_height = max(1, int(round(height * scale)))
         resized = self._resize(image, resized_width, resized_height)
 
-        canvas = np.full(
-            (self._input_height, self._input_width, 3),
-            114,
-            dtype=np.uint8,
-        )
+        canvas = getattr(self._scratch, "canvas", None)
+        expected_shape = (self._input_height, self._input_width, 3)
+        if canvas is None or canvas.shape != expected_shape:
+            canvas = np.empty(expected_shape, dtype=np.uint8)
+            self._scratch.canvas = canvas
+        canvas.fill(114)
         pad_x = (self._input_width - resized_width) // 2
         pad_y = (self._input_height - resized_height) // 2
         canvas[pad_y : pad_y + resized_height, pad_x : pad_x + resized_width] = resized
 
-        rgb = canvas[:, :, ::-1]
-        tensor = rgb.astype(np.float32) / 255.0
-        tensor = np.transpose(tensor, (2, 0, 1))[None, ...]
+        try:
+            import cv2
+
+            tensor = cv2.dnn.blobFromImage(
+                canvas,
+                scalefactor=1.0 / 255.0,
+                size=(self._input_width, self._input_height),
+                mean=(0.0, 0.0, 0.0),
+                swapRB=True,
+                crop=False,
+            )
+        except ImportError:
+            rgb = canvas[:, :, ::-1]
+            tensor = np.transpose(rgb.astype(np.float32) / 255.0, (2, 0, 1))[None, ...]
         return tensor, scale, pad_x, pad_y
 
     @staticmethod
