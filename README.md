@@ -100,11 +100,19 @@ La policy effettiva è adattiva:
 | 3-4 | YOLO26s | 640 | 2.0 | 2 stream |
 | 5-6 | YOLO26n | 512 | 2.0 | 2 stream |
 
-Con più camere, il runtime usa un micro-batcher di pochi millisecondi: richieste
-contemporanee vengono aggregate fino al numero di request configurato e passate
-a Ultralytics/OpenVINO come un unico batch. Questo è necessario perché
-`NUM_STREAMS > 1` produca throughput reale invece di restare una semplice
+Con più camere, la WPF usa un solo detector condiviso sull'intera fleet senza
+aprire stream RTSP aggiuntivi. I provider conservano l'ultimo frame in modo che
+preview e inferenza possano leggerlo senza contendersi la coda bounded. I frame
+dovuti nello stesso ciclo vengono aggregati fino al batch size del backend e
+passati a Ultralytics/OpenVINO come un unico batch. Questo rende effettivo il
+throughput multi-stream invece di lasciare `NUM_STREAMS > 1` come semplice
 proprietà del modello compilato.
+
+Person detection GPU e face pipeline CPU usano gate distinti: possono quindi
+sovrapporsi realmente su Iris Xe e i7. Il face recognition Windows resta invece
+legato alla camera attiva/focus; portarlo a tutte le camere richiede un
+orchestratore face-fleet separato con stato per-camera e modelli condivisi, per
+non duplicare detector/embedder in RAM.
 
 Le fasi face sono tenute sulla CPU e ricevono un budget di thread. Il limite
 viene applicato sia ai modelli OpenVINO sia a SCRFD/FaceNet/ArcFace quando usano
