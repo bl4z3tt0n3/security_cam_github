@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   python:
     name: Python tests and lint
@@ -20,11 +24,15 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+      - name: Install Qt headless runtime
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl1 libxkbcommon-x11-0 libxcb-cursor0
       - name: Install project
         run: python -m pip install --upgrade pip && python -m pip install -e ".[dev,windows]"
       - name: Ruff critical checks
         run: ruff check --select E9,F63,F7,F82 app app_windows scripts tests
       - name: Pytest
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: pytest
       - name: Scalability smoke benchmark
         run: python scripts/benchmark_scalability.py --mode fake --max-cameras 4 --duration 0.2 --warmup 0 --scenario one_person --parallel-inference 2 --fake-inference-ms 1 --json > scalability-smoke.json
