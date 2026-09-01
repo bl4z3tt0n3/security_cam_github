@@ -1,5 +1,5 @@
 using System.ComponentModel;
-using System.IO;
+using System.IO.MemoryMappedFiles;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Media;
@@ -21,10 +21,18 @@ public sealed class CameraViewModel : INotifyPropertyChanged
             ["NOT_CONFIGURED"] = Color.FromRgb(91, 101, 115),
         };
 
+    private const int FrameHeaderSize = 40;
+    private const uint FrameVersion = 1;
+    private static readonly byte[] FrameMagic = "LSCF"u8.ToArray();
+
     private ImageSource? _displayImage;
     private byte[]? _rawFrame;
+    private MemoryMappedFile? _frameMap;
+    private MemoryMappedViewAccessor? _frameView;
+    private string? _frameMapName;
     private int _rawWidth;
     private int _rawHeight;
+    private int _rawStride;
     private string _status = "NON CONFIGURATA";
     private string _statusCode = "NOT_CONFIGURED";
     private string _message = string.Empty;
@@ -101,19 +109,11 @@ public sealed class CameraViewModel : INotifyPropertyChanged
         }
         _metaText = string.Join("  •  ", details);
 
-        if (!string.IsNullOrWhiteSpace(snapshot.FrameBase64))
+        if (!string.IsNullOrWhiteSpace(snapshot.FrameSharedMemoryName))
         {
-            try
+            if (TryReadSharedFrame(snapshot))
             {
-                _rawFrame = Convert.FromBase64String(snapshot.FrameBase64);
-                _rawWidth = snapshot.FrameWidth ?? 0;
-                _rawHeight = snapshot.FrameHeight ?? 0;
                 RebuildImage();
-            }
-            catch (FormatException)
-            {
-                _rawFrame = null;
-                _displayImage = null;
             }
         }
 
@@ -162,9 +162,88 @@ public sealed class CameraViewModel : INotifyPropertyChanged
         SetDisplayTransform(_rotationDegrees, mirrored);
     }
 
+    private bool TryReadSharedFrame(SnapshotData snapshot)
+    {
+        var name = snapshot.FrameSharedMemoryName;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (!string.Equals(_frameMapName, name, StringComparison.Ordinal))
+            {
+                _frameView?.Dispose();
+                _frameMap?.Dispose();
+                _frameMap = MemoryMappedFile.OpenExisting(name, MemoryMappedFileRights.Read);
+                _frameView = _frameMap.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+                _frameMapName = name;
+            }
+            var view = _frameView;
+            if (view is null)
+            {
+                return false;
+            }
+
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                var magic = new byte[FrameMagic.Length];
+                view.ReadArray(0, magic, 0, magic.Length);
+                if (!magic.AsSpan().SequenceEqual(FrameMagic))
+                {
+                    return false;
+                }
+                var version = view.ReadUInt32(4);
+                var epochBefore = view.ReadUInt64(8);
+                if (version != FrameVersion || (epochBefore & 1UL) != 0)
+                {
+                    Thread.Yield();
+                    continue;
+                }
+                var sequence = view.ReadUInt64(16);
+                var width = checked((int)view.ReadUInt32(24));
+                var height = checked((int)view.ReadUInt32(28));
+                var stride = checked((int)view.ReadUInt32(32));
+                var byteCount = checked((int)view.ReadUInt32(36));
+                if (
+                    width <= 0 || height <= 0 || stride < width * 3 ||
+                    byteCount != stride * height ||
+                    (snapshot.FrameSequence is not null && sequence != (ulong)snapshot.FrameSequence.Value)
+                )
+                {
+                    return false;
+                }
+                if (_rawFrame is null || _rawFrame.Length != byteCount)
+                {
+                    _rawFrame = new byte[byteCount];
+                }
+                view.ReadArray(FrameHeaderSize, _rawFrame, 0, byteCount);
+                var epochAfter = view.ReadUInt64(8);
+                if (epochBefore == epochAfter && (epochAfter & 1UL) == 0)
+                {
+                    _rawWidth = width;
+                    _rawHeight = height;
+                    _rawStride = stride;
+                    return true;
+                }
+                Thread.Yield();
+            }
+        }
+        catch (Exception)
+        {
+            _frameView?.Dispose();
+            _frameMap?.Dispose();
+            _frameView = null;
+            _frameMap = null;
+            _frameMapName = null;
+        }
+        return false;
+    }
+
     private void RebuildImage()
     {
-        if (_rawFrame is null || _rawFrame.Length == 0)
+        if (_rawFrame is null || _rawFrame.Length == 0 || _rawStride <= 0)
         {
             _displayImage = null;
             _emptyVisibility = Visibility.Visible;
@@ -173,14 +252,16 @@ public sealed class CameraViewModel : INotifyPropertyChanged
 
         try
         {
-            using var stream = new MemoryStream(_rawFrame, writable: false);
-            var bitmap = new BitmapImage();
-            bitmap.BeginInit();
-            bitmap.CacheOption = BitmapCacheOption.OnLoad;
-            bitmap.StreamSource = stream;
-            bitmap.EndInit();
-            bitmap.Freeze();
-            BitmapSource source = bitmap;
+            BitmapSource source = BitmapSource.Create(
+                _rawWidth,
+                _rawHeight,
+                96,
+                96,
+                PixelFormats.Bgr24,
+                null,
+                _rawFrame,
+                _rawStride);
+            source.Freeze();
             if (_rotationDegrees != 0 || _mirrored)
             {
                 var group = new TransformGroup();
