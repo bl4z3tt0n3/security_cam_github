@@ -40,6 +40,36 @@ fingerprint; gli embedding di modelli diversi non vengono confrontati.
 
 La latenza riportata dagli script è la durata locale della lettura/decodifica. Non è una misura end-to-end tra fotocamera e computer.
 
+## Ottimizzazioni runtime
+
+Il percorso live evita backlog: acquisizione e sampling usano buffer bounded
+latest-frame. Sul branch ottimizzato, inoltre:
+
+- gli eventi DEBUG per-frame non vengono costruiti se DEBUG è disabilitato;
+- ONNX riusa il letterbox per thread e usa preprocessing OpenCV DNN;
+- SCRFD riusa il canvas e le griglie stride/anchor;
+- il matching facciale pre-normalizza la gallery al refresh e usa un unico
+  prodotto matrice-vettore per query;
+- OpenVINO verifica `EXECUTION_DEVICES` una sola volta per modello compilato;
+- i detector dichiarati thread-safe possono usare inferenza multi-camera
+  bounded-parallel; i backend non dichiarati sicuri restano serializzati;
+- il polling `nvidia-smi` ha cache TTL per evitare un processo per refresh UI;
+- la preview WPF usa named shared memory BGR anziché JPEG/Base64 dentro JSON;
+- Android riduce copie RTP e mantiene in cache lo stato geometrico EGL finché
+  non cambiano surface/orientamento/diagnostica.
+
+Il benchmark di scalabilità può confrontare esplicitamente la larghezza del gate
+di inferenza. Esempio sintetico con 20 ms di latenza detector:
+
+```powershell
+python scripts/benchmark_scalability.py --mode fake --max-cameras 4 --duration 2 --warmup 0.5 --fake-inference-ms 20 --parallel-inference 1
+python scripts/benchmark_scalability.py --mode fake --max-cameras 4 --duration 2 --warmup 0.5 --fake-inference-ms 20 --parallel-inference 4
+```
+
+Con `--parallel-inference 0` viene usata la policy di produzione: parallelismo
+solo quando il detector espone esplicitamente la capacità di esecuzione
+concurrent-safe.
+
 ## Requisiti
 
 Su Windows sono richiesti:
