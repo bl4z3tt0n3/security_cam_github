@@ -22,8 +22,19 @@ class InferenceGate:
     making camera state or metrics shared.
     """
 
-    def __init__(self) -> None:
-        self._lock = threading.RLock()
+    def __init__(self, max_parallel: int = 1) -> None:
+        if isinstance(max_parallel, bool) or not isinstance(max_parallel, int) or max_parallel < 1:
+            raise ValueError("max_parallel must be a positive integer")
+        self._max_parallel = max_parallel
+        self._guard: Any = (
+            threading.RLock()
+            if max_parallel == 1
+            else threading.BoundedSemaphore(max_parallel)
+        )
+
+    @property
+    def max_parallel(self) -> int:
+        return self._max_parallel
 
     def run(
         self,
@@ -33,7 +44,7 @@ class InferenceGate:
     ) -> ResultT:
         """Run one model operation while holding the shared inference lock."""
 
-        with self._lock:
+        with self._guard:
             return operation(*args, **kwargs)
 
 
@@ -75,6 +86,10 @@ class SynchronizedPersonDetector(PersonDetector):
     @property
     def device_verified(self) -> bool:
         return self._detector.device_verified
+
+    @property
+    def supports_concurrent_inference(self) -> bool:
+        return self._detector.supports_concurrent_inference
 
     def detect(
         self,
