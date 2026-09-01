@@ -291,6 +291,49 @@ class FleetFaceRecognitionController(FaceRecognitionController):
         # one atomic matcher.refresh() updates the entire fleet.
         return gallery
 
+    def _clear_camera_face_state(
+        self,
+        camera_id: str,
+        settings: FaceRecognitionSettings,
+        *,
+        generation: int,
+    ) -> None:
+        orchestrator = self._orchestrators_by_camera.get(camera_id)
+        if orchestrator is not None:
+            orchestrator.reset()
+        previous = self._snapshots_by_camera.get(camera_id)
+        if (
+            previous is not None
+            and previous.face_count == 0
+            and previous.status is FaceRecognitionStatus.READY
+        ):
+            return
+        self._publish_fleet(
+            FaceRecognitionSnapshot(
+                camera_id=camera_id,
+                status=FaceRecognitionStatus.READY,
+                message="Face pipeline pronta; attesa di persona",
+                detection_status=FaceRecognitionStatus.READY,
+                detection_message="Face detector pronto; attesa di persona",
+                recognition_status=(
+                    FaceRecognitionStatus.READY
+                    if settings.recognition_enabled
+                    else FaceRecognitionStatus.DISABLED
+                ),
+                recognition_message=(
+                    "Recognizer pronto"
+                    if settings.recognition_enabled
+                    else "Riconoscimento facciale disabilitato"
+                ),
+                detector_id=settings.detector_id,
+                recognizer_id=settings.recognizer_id,
+                requested_detector_device=settings.detector_device,
+                requested_recognizer_device=settings.recognizer_device,
+                overlays=(),
+            ),
+            generation=generation,
+        )
+
     def _snapshot_from_result(
         self,
         *,
@@ -464,6 +507,17 @@ class FleetFaceRecognitionController(FaceRecognitionController):
                     and snapshot.tracking_pipeline is not None
                     and snapshot.person_count > 0
                 ]
+                for camera_id, snapshot in person_snapshots.items():
+                    if (
+                        camera_id in providers
+                        and snapshot.tracking_pipeline is not None
+                        and snapshot.person_count <= 0
+                    ):
+                        self._clear_camera_face_state(
+                            camera_id,
+                            settings,
+                            generation=generation,
+                        )
                 should_load = bool(eligible or active_camera_id)
                 if template is None and should_load and settings.face_detection_enabled:
                     target = active_camera_id or (eligible[0] if eligible else None)
