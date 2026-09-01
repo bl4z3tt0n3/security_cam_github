@@ -441,7 +441,14 @@ class MultiCameraRuntime:
             self._detector = detector
             self._inference_gate = detector.gate
         else:
-            self._inference_gate = inference_gate or InferenceGate()
+            default_parallelism = (
+                len(runtimes)
+                if detector.supports_concurrent_inference
+                else 1
+            )
+            self._inference_gate = inference_gate or InferenceGate(
+                max_parallel=default_parallelism
+            )
             self._detector = SynchronizedPersonDetector(detector, self._inference_gate)
         self._face_analysis_hook = face_analysis_hook
         self._face_orchestrators = dict(face_orchestrators or {})
