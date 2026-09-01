@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0,<9",
+    "ruff>=0.9,<1",
 ]
 windows = [
     "PySide6>=6.7,<7",
