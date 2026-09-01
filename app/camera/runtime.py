@@ -442,15 +442,28 @@ class MultiCameraRuntime:
             self._detector = detector
             self._inference_gate = detector.gate
         else:
+            effective_detector: PersonDetector = detector
+            if (
+                len(runtimes) > 1
+                and detector.supports_batch_inference
+                and detector.preferred_batch_size > 1
+            ):
+                effective_detector = BatchingPersonDetector(
+                    detector,
+                    max_batch_size=min(len(runtimes), detector.preferred_batch_size),
+                )
             default_parallelism = (
                 len(runtimes)
-                if detector.supports_concurrent_inference
+                if effective_detector.supports_concurrent_inference
                 else 1
             )
             self._inference_gate = inference_gate or InferenceGate(
                 max_parallel=default_parallelism
             )
-            self._detector = SynchronizedPersonDetector(detector, self._inference_gate)
+            self._detector = SynchronizedPersonDetector(
+                effective_detector,
+                self._inference_gate,
+            )
         self._face_analysis_hook = face_analysis_hook
         self._face_orchestrators = dict(face_orchestrators or {})
         for runtime in runtimes:
@@ -495,6 +508,10 @@ class MultiCameraRuntime:
             except Exception as exc:  # pragma: no cover - defensive shutdown isolation
                 runtime._record_error(exc)
                 self._logger.error("camera=%s stop failed: %s", runtime.camera_id, exc)
+        try:
+            self._detector.close()
+        except Exception as exc:
+            self._logger.error("shared detector close failed: %s", exc)
 
     def snapshot(self) -> dict[str, CameraRuntimeSnapshot]:
         """Return snapshots keyed by camera id."""
