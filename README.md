@@ -70,6 +70,98 @@ Con `--parallel-inference 0` viene usata la policy di produzione: parallelismo
 solo quando il detector espone esplicitamente la capacità di esecuzione
 concurrent-safe.
 
+## Profilo Intel i7 + Iris Xe + 16 GB
+
+Il branch `new` include un profilo hardware opt-in specifico per un PC Windows
+con Intel Core i7, GPU integrata Intel Iris Xe e 16 GB di RAM. Nel file di
+esempio il profilo è attivo:
+
+```yaml
+hardware_optimization:
+  enabled: true
+  profile: intel_iris_xe
+  adaptive_person_detection: true
+  force_face_cpu: true
+  gpu_streams: 2
+  gpu_num_requests: 2
+  cpu_threads: 0
+  max_process_ram_mb: 6144
+  background_preview_fps: 5
+  background_preview_max_width: 480
+```
+
+La policy effettiva è adattiva:
+
+| Camere abilitate | Person model | Input | FPS/camera | OpenVINO GPU |
+| --- | --- | ---: | ---: | --- |
+| 1 | YOLO26s | 640 | 3.0 | 1 stream, latency |
+| 2 | YOLO26s | 640 | 2.5 | 2 stream |
+| 3-4 | YOLO26s | 640 | 2.0 | 2 stream |
+| 5-6 | YOLO26n | 512 | 2.0 | 2 stream |
+
+Con più camere, il runtime usa un micro-batcher di pochi millisecondi: richieste
+contemporanee vengono aggregate fino al numero di request configurato e passate
+a Ultralytics/OpenVINO come un unico batch. Questo è necessario perché
+`NUM_STREAMS > 1` produca throughput reale invece di restare una semplice
+proprietà del modello compilato.
+
+Le fasi face OpenVINO sono tenute sulla CPU e ricevono un budget di thread.
+Con `cpu_threads: 0` il budget è circa metà dei logical CPU, con minimo 2 e
+massimo 8 thread, lasciando capacità a decoding, tracking, WPF e Windows.
+Il fallback GPU→CPU di YOLO resta in modalità `LATENCY` sincrona: non usa il
+batch async CPU.
+
+La Iris Xe usa memoria di sistema. Prima di caricare/ricompilare nuovi modelli
+OpenVINO il processo controlla il proprio RSS; il profilo di esempio rifiuta un
+nuovo caricamento quando il processo ha già raggiunto 6144 MiB. I frame restano
+bounded latest-frame e la preview delle camere non in focus resta ridotta e
+limitata a 5 FPS.
+
+Per la decodifica H.264 il profilo prova OpenCV/FFmpeg con Intel MFX/Quick Sync.
+Se il build locale non supporta `CAP_PROP_HW_ACCELERATION`, MFX non è
+disponibile, oppure lo stream non si apre, `OpenCVVideoSource` riprova
+automaticamente lo stesso stream in software. Il decoder realmente ottenuto è
+esposto in telemetria.
+
+Quando dalla UI Windows viene abilitata o disabilitata una camera, il file YAML
+viene ricaricato e la policy viene ricalcolata immediatamente; non è necessario
+riavviare il monitor per attraversare le soglie 1/2/4/5 camere.
+
+### Benchmark del PC reale
+
+Il piano, senza caricare modelli:
+
+```powershell
+python scripts\benchmark_intel_hardware.py --config config\config.local.yaml --json
+```
+
+Il benchmark reale dei tre candidati OpenVINO:
+
+```powershell
+python scripts\benchmark_intel_hardware.py --config config\config.local.yaml --run --iterations 40 --warmup 5 --json
+```
+
+Per confrontare anche software decode, Intel MFX e D3D11 sulla camera
+configurata:
+
+```powershell
+python scripts\benchmark_intel_hardware.py --config config\config.local.yaml --run --benchmark-decode --camera-id huawei_p30 --json --output reports\intel_hardware_profile.json
+```
+
+Il report separa latenza end-to-end del detector e throughput raw OpenVINO e
+sceglie YOLO26s quando conserva almeno il 30% di headroom sul throughput
+aggregato richiesto; altrimenti può raccomandare YOLO26n/512. Il benchmark
+decode registra anche l'accelerazione realmente ottenuta, quindi una richiesta
+MFX che è ricaduta sul software non viene scambiata per Quick Sync attivo.
+
+Per disabilitare completamente la policy hardware:
+
+```yaml
+hardware_optimization:
+  enabled: false
+  profile: none
+```
+
 ## Requisiti
 
 Su Windows sono richiesti:
