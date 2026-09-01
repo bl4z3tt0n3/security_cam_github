@@ -344,6 +344,18 @@ class BridgeRuntime(QObject):
             self._logger.exception("WPF bridge command failed: %s", message)
             self._emit("error", {"message": message, "command": name})
 
+    def _reload_effective_profile(self) -> tuple[PersonDetectionSettings, FaceRecognitionSettings]:
+        """Reload YAML so camera-count hardware adaptation takes effect immediately."""
+
+        self._config = load_config(self._config_path)
+        person_settings = PersonDetectionSettings.from_app_config(
+            self._config,
+            repo_root=self._repo_root,
+        )
+        face_settings = self._face_controller.update_config(self._config)
+        self._person_controller.update_settings(person_settings)
+        return person_settings, face_settings
+
     def _set_active_camera(self, camera_id: object) -> None:
         normalized = str(camera_id).strip() if camera_id else None
         if normalized is not None and not any(
@@ -383,6 +395,15 @@ class BridgeRuntime(QObject):
             # applying a previous edit. The frontend can surface the error and
             # the next edit will retry through the same controller contract.
             raise
+        person_settings, _face_settings = self._reload_effective_profile()
+        self._emit(
+            "person_settings_saved",
+            {
+                "ok": True,
+                "path": str(self._config_path),
+                "settings": self._person_settings_data(person_settings),
+            },
+        )
 
     def _test_connection(self, data: dict[str, Any]) -> None:
         draft = self._draft_from_data(data)
@@ -447,10 +468,14 @@ class BridgeRuntime(QObject):
             settings,
             current_path=self._config_path,
         )
-        self._person_controller.update_settings(settings)
+        effective_settings, _face_settings = self._reload_effective_profile()
         self._emit(
             "person_settings_saved",
-            {"ok": True, "path": str(self._config_path), "settings": self._person_settings_data(settings)},
+            {
+                "ok": True,
+                "path": str(self._config_path),
+                "settings": self._person_settings_data(effective_settings),
+            },
         )
 
     def _set_face_settings(self, data: dict[str, Any], *, detection_only: bool) -> None:
@@ -497,14 +522,14 @@ class BridgeRuntime(QObject):
             settings,
             current_path=self._config_path,
         )
-        self._face_controller.update_settings(settings)
+        _person_settings, effective_face = self._reload_effective_profile()
         self._emit(
             "face_settings_saved",
             {
                 "ok": True,
                 "path": str(self._config_path),
                 "section": "detection" if detection_only else "recognition",
-                "settings": self._face_settings_data(settings),
+                "settings": self._face_settings_data(effective_face),
             },
         )
 
