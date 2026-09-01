@@ -43,8 +43,10 @@ def frame_to_qimage(frame: np.ndarray):
         image = np.clip(image, 0, 255).astype(np.uint8)
 
     if image.shape[2] == 3:
-        converted = np.ascontiguousarray(image[:, :, ::-1])
-        format_ = QImage.Format.Format_RGB888
+        # Qt 6 can consume OpenCV's native BGR order directly. This avoids a
+        # full-frame channel swap before the final lifetime-detaching copy.
+        converted = np.ascontiguousarray(image)
+        format_ = QImage.Format.Format_BGR888
     else:
         converted = np.ascontiguousarray(image[:, :, [2, 1, 0, 3]])
         format_ = QImage.Format.Format_RGBA8888
