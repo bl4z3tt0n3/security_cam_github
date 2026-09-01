@@ -176,6 +176,11 @@ class CameraConfigRepository:
         person_detection["device"] = settings.device
         person_detection["fallback_device"] = settings.fallback_device
         person_detection["image_size"] = settings.image_size
+        person_detection["openvino_performance_mode"] = settings.openvino_performance_mode
+        person_detection["openvino_num_streams"] = settings.openvino_num_streams
+        person_detection["openvino_num_requests"] = settings.openvino_num_requests
+        person_detection["openvino_cpu_threads"] = settings.openvino_cpu_threads
+        person_detection["max_process_ram_mb"] = settings.max_process_ram_mb
         person_detection["classes"] = list(settings.classes)
         person_detection["prompts"] = list(settings.prompts)
         person_detection["show_masks"] = settings.show_masks
