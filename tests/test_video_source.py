@@ -493,3 +493,64 @@ def test_default_capture_factory_falls_back_from_mfx_to_software(monkeypatch) ->
     )
     assert fake.calls[1][1:] == (fake.CAP_FFMPEG,)
 
+def test_default_capture_factory_auto_tries_mfx_then_d3d11(monkeypatch) -> None:
+    class Capture:
+        def __init__(self, opened: bool) -> None:
+            self.opened = opened
+            self.released = False
+
+        def isOpened(self) -> bool:
+            return self.opened
+
+        def release(self) -> None:
+            self.released = True
+
+    class FakeCv2:
+        CAP_FFMPEG = 1900
+        CAP_PROP_HW_ACCELERATION = 50
+        VIDEO_ACCELERATION_NONE = 0
+        VIDEO_ACCELERATION_ANY = 1
+        VIDEO_ACCELERATION_D3D11 = 2
+        VIDEO_ACCELERATION_MFX = 4
+        error = RuntimeError
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+            self.mfx = Capture(False)
+            self.d3d11 = Capture(True)
+            self.software = Capture(True)
+
+        def VideoCapture(self, url: str, *args: object) -> Capture:
+            self.calls.append((url, *args))
+            if len(args) == 2 and args[1] == [
+                self.CAP_PROP_HW_ACCELERATION,
+                self.VIDEO_ACCELERATION_MFX,
+            ]:
+                return self.mfx
+            if len(args) == 2 and args[1] == [
+                self.CAP_PROP_HW_ACCELERATION,
+                self.VIDEO_ACCELERATION_D3D11,
+            ]:
+                return self.d3d11
+            return self.software
+
+    fake = FakeCv2()
+    monkeypatch.setattr(opencv_module, "cv2", fake)
+
+    capture = opencv_module._default_capture_factory(
+        "rtsp://camera.local/live",
+        "auto",
+        "auto",
+    )
+
+    assert capture is fake.d3d11
+    assert fake.mfx.released is True
+    assert fake.calls[0][2] == [
+        fake.CAP_PROP_HW_ACCELERATION,
+        fake.VIDEO_ACCELERATION_MFX,
+    ]
+    assert fake.calls[1][2] == [
+        fake.CAP_PROP_HW_ACCELERATION,
+        fake.VIDEO_ACCELERATION_D3D11,
+    ]
+
