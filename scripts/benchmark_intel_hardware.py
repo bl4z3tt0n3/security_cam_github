@@ -9,15 +9,18 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 import platform
 import statistics
 import sys
+import tempfile
 import time
 from typing import Any
 
 import numpy as np
 import psutil
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -68,6 +71,11 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--camera-id", default=None)
     value.add_argument("--decode-seconds", type=float, default=4.0)
     value.add_argument("--run", action="store_true", help="load models and run real benchmarks")
+    value.add_argument(
+        "--apply",
+        action="store_true",
+        help="persist the measured recommendation to config.local.yaml; requires --run",
+    )
     value.add_argument(
         "--benchmark-decode",
         action="store_true",
@@ -295,6 +303,184 @@ def _recommend_model(results: list[dict[str, Any]], count: int) -> dict[str, Any
     }
 
 
+def _recommend_decode(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Choose hardware decode only when it is actually used and does not regress FPS."""
+
+    usable = [
+        row
+        for row in results
+        if "unavailable" not in row
+        and isinstance(row.get("decoded_fps"), (int, float))
+        and float(row.get("decoded_fps", 0.0)) > 0
+    ]
+    software = next((row for row in usable if row.get("requested") == "none"), None)
+    hardware = [
+        row
+        for row in usable
+        if row.get("requested") in {"mfx", "d3d11"}
+        and row.get("actual") == row.get("requested")
+    ]
+    if not hardware:
+        return {
+            "requested": "none",
+            "source": "fallback",
+            "reason": "no hardware decoder was verified",
+        }
+
+    if software is None:
+        chosen = min(
+            hardware,
+            key=lambda row: (
+                float(row.get("process_cpu_percent", 1e9)),
+                -float(row.get("decoded_fps", 0.0)),
+            ),
+        )
+        return {"requested": chosen["requested"], "source": "measured", "row": chosen}
+
+    baseline_fps = float(software.get("decoded_fps", 0.0))
+    baseline_cpu = float(software.get("process_cpu_percent", 0.0))
+    candidates = [
+        row
+        for row in hardware
+        if float(row.get("decoded_fps", 0.0)) >= baseline_fps * 0.95
+    ]
+    if not candidates:
+        return {
+            "requested": "none",
+            "source": "measured",
+            "reason": "hardware decode reduced decoded FPS by more than 5%",
+            "row": software,
+        }
+
+    chosen = min(
+        candidates,
+        key=lambda row: (
+            float(row.get("process_cpu_percent", 1e9)),
+            -float(row.get("decoded_fps", 0.0)),
+        ),
+    )
+    chosen_cpu = float(chosen.get("process_cpu_percent", 0.0))
+    chosen_fps = float(chosen.get("decoded_fps", 0.0))
+    materially_better = (
+        chosen_cpu <= baseline_cpu * 0.95
+        or chosen_fps >= baseline_fps * 1.05
+    )
+    if not materially_better:
+        return {
+            "requested": "none",
+            "source": "measured",
+            "reason": "hardware decode produced no material CPU/FPS improvement",
+            "row": software,
+        }
+    return {"requested": chosen["requested"], "source": "measured", "row": chosen}
+
+
+def _apply_recommendation(
+    config_path: Path,
+    *,
+    count: int,
+    model_recommendation: dict[str, Any],
+    decode_recommendation: dict[str, Any] | None,
+) -> Path:
+    candidate = model_recommendation.get("candidate")
+    if not isinstance(candidate, dict):
+        raise ValueError(
+            "--apply requires a measured OpenVINO candidate; no benchmark candidate was available"
+        )
+
+    source = config_path
+    if not source.is_file():
+        raise ValueError(f"configuration file does not exist: {source}")
+    target = (
+        source.with_name("config.local.yaml")
+        if source.name == "config.example.yaml"
+        else source
+    )
+    if target.is_file():
+        source = target
+
+    raw = yaml.safe_load(source.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("configuration root must be a YAML mapping")
+
+    hardware = raw.setdefault("hardware_optimization", {})
+    person = raw.setdefault("person_detection", {})
+    inference = raw.setdefault("inference", {})
+    video = raw.setdefault("video", {})
+    if not all(isinstance(value, dict) for value in (hardware, person, inference, video)):
+        raise ValueError("hardware/person/inference/video configuration sections must be mappings")
+
+    adaptive = adaptive_person_profile(count)
+    streams = int(candidate["num_streams"])
+    requests = int(candidate["num_requests"])
+    performance_mode = str(candidate["performance_mode"])
+    hardware.update(
+        {
+            "enabled": True,
+            "profile": "intel_iris_xe",
+            # The benchmark result is now the explicit local policy. The user
+            # can restore adaptive mode later by setting this back to true.
+            "adaptive_person_detection": False,
+            "gpu_performance_mode": performance_mode,
+            "gpu_streams": streams,
+            "gpu_num_requests": requests,
+        }
+    )
+    person.update(
+        {
+            "backend": "openvino",
+            "model": str(candidate["model"]),
+            "precision": "fp16",
+            "device": "gpu",
+            "fallback_device": "cpu",
+            "image_size": int(candidate["image_size"]),
+            "openvino_performance_mode": performance_mode,
+            "openvino_num_streams": streams,
+            "openvino_num_requests": requests,
+            "classes": ["person"],
+            "prompts": ["person"],
+            "show_masks": False,
+        }
+    )
+    inference["person_detection_fps"] = adaptive.inference_fps
+
+    if decode_recommendation is not None:
+        decode = str(decode_recommendation.get("requested") or "auto")
+        if decode not in {"auto", "none", "mfx", "d3d11"}:
+            raise ValueError(f"invalid decode recommendation: {decode}")
+        hardware["decode_acceleration"] = decode
+        video["hardware_acceleration"] = decode
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    rendered = yaml.safe_dump(
+        raw,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+    )
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return target
+
+
 def _stream_url(config: Any, camera_id: str | None) -> str:
     if camera_id:
         camera = get_camera(config, camera_id)
@@ -348,6 +534,8 @@ def _benchmark_decode(config: Any, camera_id: str | None, seconds: float) -> lis
 def main() -> int:
     args = parser().parse_args()
     try:
+        if args.apply and not args.run:
+            raise ValueError("--apply requires --run")
         config_path, config = _load(args.config)
         count = _camera_count(config, args.camera_count)
         report: dict[str, Any] = {
@@ -362,10 +550,21 @@ def main() -> int:
             report["recommendation"] = _recommend_model(
                 report["model_benchmarks"], count
             )
+            decode_recommendation = None
             if args.benchmark_decode:
                 report["decode_benchmarks"] = _benchmark_decode(
                     config, args.camera_id, args.decode_seconds
                 )
+                decode_recommendation = _recommend_decode(report["decode_benchmarks"])
+                report["decode_recommendation"] = decode_recommendation
+            if args.apply:
+                applied_path = _apply_recommendation(
+                    config_path,
+                    count=count,
+                    model_recommendation=report["recommendation"],
+                    decode_recommendation=decode_recommendation,
+                )
+                report["applied_config"] = str(applied_path)
         if args.output is not None:
             args.output.parent.mkdir(parents=True, exist_ok=True)
             args.output.write_text(
