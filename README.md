@@ -82,6 +82,7 @@ hardware_optimization:
   profile: intel_iris_xe
   adaptive_person_detection: true
   force_face_cpu: true
+  decode_acceleration: auto
   gpu_streams: 2
   gpu_num_requests: 2
   cpu_threads: 0
@@ -105,22 +106,24 @@ a Ultralytics/OpenVINO come un unico batch. Questo è necessario perché
 `NUM_STREAMS > 1` produca throughput reale invece di restare una semplice
 proprietà del modello compilato.
 
-Le fasi face OpenVINO sono tenute sulla CPU e ricevono un budget di thread.
-Con `cpu_threads: 0` il budget è circa metà dei logical CPU, con minimo 2 e
-massimo 8 thread, lasciando capacità a decoding, tracking, WPF e Windows.
+Le fasi face sono tenute sulla CPU e ricevono un budget di thread. Il limite
+viene applicato sia ai modelli OpenVINO sia a SCRFD/FaceNet/ArcFace quando usano
+ONNX Runtime. Con `cpu_threads: 0` il budget è circa metà dei logical CPU, con
+minimo 2 e massimo 8 thread, lasciando capacità a decoding, tracking, WPF e
+Windows.
 Il fallback GPU→CPU di YOLO resta in modalità `LATENCY` sincrona: non usa il
 batch async CPU.
 
 La Iris Xe usa memoria di sistema. Prima di caricare/ricompilare nuovi modelli
-OpenVINO il processo controlla il proprio RSS; il profilo di esempio rifiuta un
-nuovo caricamento quando il processo ha già raggiunto 6144 MiB. I frame restano
+il processo controlla sia il proprio RSS sia la RAM realmente disponibile; con
+il budget da 6144 MiB conserva anche una riserva fino a 3072 MiB per Windows,
+WPF, superfici del decoder e memoria condivisa della iGPU. I frame restano
 bounded latest-frame e la preview delle camere non in focus resta ridotta e
 limitata a 5 FPS.
 
-Per la decodifica H.264 il profilo prova OpenCV/FFmpeg con Intel MFX/Quick Sync.
-Se il build locale non supporta `CAP_PROP_HW_ACCELERATION`, MFX non è
-disponibile, oppure lo stream non si apre, `OpenCVVideoSource` riprova
-automaticamente lo stesso stream in software. Il decoder realmente ottenuto è
+Per la decodifica H.264, `decode_acceleration: auto` prova OpenCV/FFmpeg
+nell'ordine Intel MFX/Quick Sync → D3D11 → software. Il benchmark può fissare
+`mfx`, `d3d11` o `none` quando misura un vincitore reale. Il decoder realmente ottenuto è
 esposto in telemetria.
 
 Quando dalla UI Windows viene abilitata o disabilitata una camera, il file YAML
@@ -135,7 +138,7 @@ Il piano, senza caricare modelli:
 python scripts\benchmark_intel_hardware.py --config config\config.local.yaml --json
 ```
 
-Il benchmark reale dei tre candidati OpenVINO:
+Il benchmark reale confronta YOLO26s/640 e YOLO26n/512 con 1, 2, 3 e 4 stream:
 
 ```powershell
 python scripts\benchmark_intel_hardware.py --config config\config.local.yaml --run --iterations 40 --warmup 5 --json
@@ -147,6 +150,18 @@ configurata:
 ```powershell
 python scripts\benchmark_intel_hardware.py --config config\config.local.yaml --run --benchmark-decode --camera-id huawei_p30 --json --output reports\intel_hardware_profile.json
 ```
+
+Per applicare automaticamente il candidato OpenVINO misurato e, se eseguito
+anche il benchmark decode, il decoder migliore:
+
+```powershell
+python scripts\benchmark_intel_hardware.py --config config\config.local.yaml --run --benchmark-decode --camera-id huawei_p30 --apply --json --output reports\intel_hardware_profile.json
+```
+
+`--apply` scrive solo `config.local.yaml`, conserva le altre sezioni e
+imposta `adaptive_person_detection: false` perché da quel momento prevale il
+profilo misurato. Per tornare alla policy basata sul numero di camere è
+sufficiente rimettere quel flag a `true`.
 
 Il report separa latenza end-to-end del detector e throughput raw OpenVINO e
 sceglie YOLO26s quando conserva almeno il 30% di headroom sul throughput
