@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import mmap
+import os
+
+import numpy as np
 import pytest
 
 from app.face import capabilities as face_capabilities
 from app.face.capabilities import FaceCapability
 from app.face.registry import FACE_DETECTOR_SPECS, RECOGNIZER_SPECS
-from app_windows.wpf_bridge import face_capability_rows
+from app_windows.wpf_bridge import (
+    SharedFramePublisher,
+    _FRAME_HEADER,
+    _FRAME_MAGIC,
+    _FRAME_VERSION,
+    face_capability_rows,
+)
 
 
 def test_face_capability_rows_serializes_dataclasses_for_wpf() -> None:
@@ -86,3 +96,29 @@ def test_face_capability_rows_preserves_mapping_payloads() -> None:
 def test_face_capability_rows_rejects_unknown_rows() -> None:
     with pytest.raises(TypeError, match="unsupported face capability row"):
         face_capability_rows([object()])
+
+@pytest.mark.skipif(os.name != "nt", reason="named mmap preview transport is Windows-only")
+def test_shared_frame_publisher_exposes_consistent_raw_bgr_frame() -> None:
+    publisher = SharedFramePublisher("cam:test")
+    frame = np.arange(4 * 5 * 3, dtype=np.uint8).reshape(4, 5, 3)
+    try:
+        metadata = publisher.publish(17, frame)
+        byte_count = metadata["frame_byte_count"]
+        with mmap.mmap(
+            -1,
+            _FRAME_HEADER.size + byte_count,
+            tagname=metadata["frame_shm_name"],
+            access=mmap.ACCESS_READ,
+        ) as view:
+            header = _FRAME_HEADER.unpack_from(view, 0)
+            magic, version, epoch, sequence, width, height, stride, stored_bytes = header
+            assert magic == _FRAME_MAGIC
+            assert version == _FRAME_VERSION
+            assert epoch % 2 == 0
+            assert sequence == 17
+            assert (width, height, stride, stored_bytes) == (5, 4, 15, 60)
+            view.seek(_FRAME_HEADER.size)
+            assert view.read(stored_bytes) == frame.tobytes()
+    finally:
+        publisher.close()
+
