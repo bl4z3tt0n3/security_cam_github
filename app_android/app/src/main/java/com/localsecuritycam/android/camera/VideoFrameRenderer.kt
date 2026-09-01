@@ -79,6 +79,11 @@ class VideoFrameRenderer(
     private var firstPreviewFrameRenderedLogged = false
     private var previewDiagnosticActive = false
     private var lastPreviewDiagnosticTarget: String? = null
+    // Render-thread-only scratch buffers. Reusing them removes several small
+    // allocations from every camera frame and therefore reduces GC pressure.
+    private val textureMatrixScratch = FloatArray(16)
+    private val rotationMatrixScratch = FloatArray(16)
+    private val geometryMatrixScratch = FloatArray(16)
 
     private val diagnosticsEnabled: Boolean
         get() = diagnosticMode != PreviewDiagnosticMode.NORMAL
@@ -402,7 +407,7 @@ class VideoFrameRenderer(
             }
             return
         }
-        val textureMatrix = FloatArray(16)
+        val textureMatrix = textureMatrixScratch
         texture.getTransformMatrix(textureMatrix)
         val surfaceTexturePixelClockwiseRotation = surfaceTexturePixelClockwiseRotationDegrees(textureMatrix)
         val currentTransform = transform
@@ -447,7 +452,8 @@ class VideoFrameRenderer(
         transform: VideoTransform,
         mirror: Boolean,
         surfaceTexturePixelClockwiseRotation: Int,
-    ): FloatArray = FloatArray(16).also { matrix ->
+    ): FloatArray {
+        val matrix = rotationMatrixScratch
         Matrix.setIdentityM(matrix, 0)
         val glTextureRotation = textureCoordinateRotationDegrees(
             cameraRelativeRotationDegrees = transform.rotationDegrees,
@@ -456,9 +462,6 @@ class VideoFrameRenderer(
             outputPixelClockwiseRotationDegrees = transform.outputPixelClockwiseRotationDegrees,
         )
         if (glTextureRotation != 0 || mirror) {
-            // SurfaceTexture's matrix is applied once by the shader. This
-            // matrix contains only the explicit camera-relative rotation
-            // converted into OpenGL's texture-coordinate direction.
             Matrix.translateM(matrix, 0, 0.5f, 0.5f, 0f)
             Matrix.rotateM(
                 matrix,
@@ -471,6 +474,7 @@ class VideoFrameRenderer(
             if (mirror) Matrix.scaleM(matrix, 0, -1f, 1f, 1f)
             Matrix.translateM(matrix, 0, -0.5f, -0.5f, 0f)
         }
+        return matrix
     }
 
     private fun makeCurrentForTextureUpdate() {
@@ -567,16 +571,17 @@ class VideoFrameRenderer(
         logEglError("eglMakeCurrent(${if (isEncoder) "encoder" else "preview"})")
         val vertices = vertexBuffer ?: return
         val texCoords = texCoordBuffer ?: return
-        val surfaceSize = IntArray(1)
-        val targetWidth = if (EGL14.eglQuerySurface(display, target, EGL14.EGL_WIDTH, surfaceSize, 0)) {
-            surfaceSize[0]
+        // Target geometry is already known by the pipeline. Querying EGL for
+        // width/height on every draw adds driver calls to the hot path.
+        val targetWidth = if (isEncoder) {
+            sourceTransform.targetWidth
         } else {
-            width
+            previewNativeSurface?.width ?: sourceTransform.targetWidth
         }
-        val targetHeight = if (EGL14.eglQuerySurface(display, target, EGL14.EGL_HEIGHT, surfaceSize, 0)) {
-            surfaceSize[0]
+        val targetHeight = if (isEncoder) {
+            sourceTransform.targetHeight
         } else {
-            height
+            previewNativeSurface?.height ?: sourceTransform.targetHeight
         }
         val targetTransform = sourceTransform.forTarget(
             targetWidth.coerceAtLeast(1),
@@ -588,7 +593,7 @@ class VideoFrameRenderer(
             height = targetHeight.coerceAtLeast(1),
             transform = targetTransform,
         )
-        val geometryMatrix = FloatArray(16)
+        val geometryMatrix = geometryMatrixScratch
         Matrix.setIdentityM(geometryMatrix, 0)
         if (useGeometry) {
             Matrix.scaleM(geometryMatrix, 0, targetTransform.scaleX, targetTransform.scaleY, 1f)
@@ -659,7 +664,10 @@ class VideoFrameRenderer(
         checkGlErrors("after eglSwapBuffers")
     }
 
-    private fun identityMatrix(): FloatArray = FloatArray(16).also { Matrix.setIdentityM(it, 0) }
+    private fun identityMatrix(): FloatArray {
+        Matrix.setIdentityM(rotationMatrixScratch, 0)
+        return rotationMatrixScratch
+    }
 
     private fun requireLocation(name: String, location: Int): Int {
         if (diagnosticsEnabled && location < 0) {
