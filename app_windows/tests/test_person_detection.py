@@ -516,6 +516,14 @@ def test_main_window_wires_focus_analysis_and_keeps_missing_model_separate_from_
             lambda: detection.snapshot.status is PersonDetectionStatus.MODEL_MISSING,
             timeout=3000,
         )
+        qtbot.waitUntil(
+            lambda: (
+                window.focus_view.person_detection_snapshot is not None
+                and window.focus_view.person_detection_snapshot.status
+                is PersonDetectionStatus.MODEL_MISSING
+            ),
+            timeout=3000,
+        )
         assert window.focus_view.configuration_panel.person_detection_panel is not None
         assert monitor.provider_for("cam_1") is not None
         assert monitor.provider_for("cam_1").start_calls == 1
