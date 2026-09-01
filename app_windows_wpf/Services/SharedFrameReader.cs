@@ -34,13 +34,11 @@ public sealed class SharedFrameReader : IDisposable
                 return false;
             }
 
-            Span<byte> expectedMagic = stackalloc byte[4];
-            Magic.CopyTo(expectedMagic);
             var observedMagic = new byte[4];
             for (var attempt = 0; attempt < 3; attempt++)
             {
                 view.ReadArray(0, observedMagic, 0, observedMagic.Length);
-                if (!observedMagic.AsSpan().SequenceEqual(expectedMagic))
+                if (!observedMagic.AsSpan().SequenceEqual(Magic))
                 {
                     return false;
                 }
