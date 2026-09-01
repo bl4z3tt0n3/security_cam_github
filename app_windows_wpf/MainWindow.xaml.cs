@@ -1577,6 +1577,7 @@ public partial class MainWindow : Window
         _faceSaveTimer.Stop();
         SaveWindowGeometry();
         _bridge.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        _viewModel.Dispose();
     }
 
     private void SetCameraStatus(string message, bool error)
