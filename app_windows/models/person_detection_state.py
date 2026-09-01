@@ -70,6 +70,11 @@ class PersonDetectionSettings:
     precision: DetectionPrecision = "fp16"
     fallback_device: DetectionFallback = "none"
     image_size: int = 640
+    openvino_performance_mode: str = "latency"
+    openvino_num_streams: int = 0
+    openvino_num_requests: int = 0
+    openvino_cpu_threads: int = 0
+    max_process_ram_mb: int = 0
     classes: tuple[str, ...] = ("person",)
     show_boxes: bool = True
     prompts: tuple[str, ...] = ("person",)
@@ -109,6 +114,19 @@ class PersonDetectionSettings:
             raise ValueError("image_size must be a positive integer")
         if not 1 <= self.image_size <= 2048:
             raise ValueError("image_size must be between 1 and 2048")
+        performance_mode = str(self.openvino_performance_mode).strip().lower()
+        if performance_mode not in {"latency", "throughput"}:
+            raise ValueError("openvino_performance_mode must be latency or throughput")
+        object.__setattr__(self, "openvino_performance_mode", performance_mode)
+        for field_name, maximum in (
+            ("openvino_num_streams", 16),
+            ("openvino_num_requests", 64),
+            ("openvino_cpu_threads", 256),
+            ("max_process_ram_mb", 131072),
+        ):
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= maximum:
+                raise ValueError(f"{field_name} must be between 0 and {maximum}")
         object.__setattr__(self, "classes", normalize_prompts(self.classes))
         object.__setattr__(self, "enabled", bool(self.enabled))
         object.__setattr__(self, "show_boxes", bool(self.show_boxes))
@@ -153,6 +171,11 @@ class PersonDetectionSettings:
             precision=config.person_detection.precision,
             fallback_device=config.person_detection.fallback_device,
             image_size=config.person_detection.image_size,
+            openvino_performance_mode=config.person_detection.openvino_performance_mode,
+            openvino_num_streams=config.person_detection.openvino_num_streams,
+            openvino_num_requests=config.person_detection.openvino_num_requests,
+            openvino_cpu_threads=config.person_detection.openvino_cpu_threads,
+            max_process_ram_mb=config.person_detection.max_process_ram_mb,
             classes=tuple(config.person_detection.classes),
             show_boxes=config.windows_ui.show_person_boxes,
             prompts=tuple(config.person_detection.prompts),
