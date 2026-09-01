@@ -111,6 +111,11 @@ class FaceMatcher:
         self.metrics = metrics
         self.inference_gate = inference_gate
         self._records: tuple[PersonRecord, ...] = ()
+        self._gallery_matrix = np.empty(
+            (0, self.embedder.metadata.embedding_dimension),
+            dtype=np.float32,
+        )
+        self._gallery_owners: tuple[PersonRecord, ...] = ()
         self.refresh()
 
     @property
@@ -120,10 +125,33 @@ class FaceMatcher:
         return self._records
 
     def refresh(self) -> tuple[PersonRecord, ...]:
-        """Reload enrolled records and validate their model contract."""
+        """Reload and pre-normalize the gallery outside the recognition hot path."""
 
-        self._records = self.person_store.load_all(expected_model=self.embedder.metadata)
-        return self._records
+        records = self.person_store.load_all(expected_model=self.embedder.metadata)
+        normalized_batches: list[np.ndarray] = []
+        owners: list[PersonRecord] = []
+        dimension = self.embedder.metadata.embedding_dimension
+        for record in records:
+            normalized = _normalize_matrix(
+                record.embeddings,
+                dimension,
+                label=f"embeddings for person '{record.person_id}'",
+            )
+            normalized_batches.append(normalized)
+            owners.extend([record] * normalized.shape[0])
+
+        matrix = (
+            np.ascontiguousarray(np.concatenate(normalized_batches, axis=0), dtype=np.float32)
+            if normalized_batches
+            else np.empty((0, dimension), dtype=np.float32)
+        )
+        # Publish the new gallery only after every validation/allocation
+        # succeeded. Matching can snapshot these references without repeatedly
+        # normalizing all enrolled embeddings.
+        self._records = records
+        self._gallery_matrix = matrix
+        self._gallery_owners = tuple(owners)
+        return records
 
     def match(self, face_image: np.ndarray) -> RecognitionResult:
         """Return a thresholded result without assigning names to unknown faces."""
@@ -171,19 +199,15 @@ class FaceMatcher:
 
         matching_started = time.perf_counter()
         try:
+            gallery = self._gallery_matrix
+            owners = self._gallery_owners
             best_record: PersonRecord | None = None
             best_score: float | None = None
-            for record in self._records:
-                enrolled = _normalize_matrix(
-                    record.embeddings,
-                    self.embedder.metadata.embedding_dimension,
-                    label=f"embeddings for person '{record.person_id}'",
-                )
-                score = float(np.max(enrolled @ embedding))
-                score = max(-1.0, min(1.0, score))
-                if best_score is None or score > best_score:
-                    best_record = record
-                    best_score = score
+            if gallery.shape[0]:
+                scores = gallery @ embedding
+                best_index = int(np.argmax(scores))
+                best_score = max(-1.0, min(1.0, float(scores[best_index])))
+                best_record = owners[best_index]
 
             if (
                 best_record is not None
