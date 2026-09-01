@@ -557,10 +557,16 @@ class ResourceSnapshot:
         }
 
 
-def _read_gpu() -> tuple[GpuStatus, float | None, int | None, int | None, str]:
-    executable = shutil.which("nvidia-smi")
-    if executable is None:
-        return "unavailable", None, None, None, "nvidia-smi not found"
+_GPU_CACHE_TTL_S = 1.0
+_GPU_CACHE_LOCK = threading.Lock()
+_gpu_cache_executable: str | None = None
+_gpu_cache_at = 0.0
+_gpu_cache_value: tuple[GpuStatus, float | None, int | None, int | None, str] | None = None
+
+
+def _read_gpu_uncached(
+    executable: str,
+) -> tuple[GpuStatus, float | None, int | None, int | None, str]:
     try:
         result = subprocess.run(
             [
@@ -594,6 +600,29 @@ def _read_gpu() -> tuple[GpuStatus, float | None, int | None, int | None, str]:
         int(round(total_mib * 1024 * 1024)),
         "nvidia-smi",
     )
+
+
+def _read_gpu() -> tuple[GpuStatus, float | None, int | None, int | None, str]:
+    """Read nvidia-smi with a short TTL so UI polling does not spawn a process per tick."""
+
+    executable = shutil.which("nvidia-smi")
+    if executable is None:
+        return "unavailable", None, None, None, "nvidia-smi not found"
+
+    global _gpu_cache_executable, _gpu_cache_at, _gpu_cache_value
+    now = time.monotonic()
+    with _GPU_CACHE_LOCK:
+        if (
+            _gpu_cache_value is not None
+            and _gpu_cache_executable == executable
+            and now - _gpu_cache_at <= _GPU_CACHE_TTL_S
+        ):
+            return _gpu_cache_value
+        value = _read_gpu_uncached(executable)
+        _gpu_cache_executable = executable
+        _gpu_cache_at = now
+        _gpu_cache_value = value
+        return value
 
 
 def read_resource_snapshot() -> ResourceSnapshot:
