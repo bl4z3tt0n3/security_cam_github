@@ -24,7 +24,7 @@ from app.benchmark import (
 )
 from app.camera import CameraRuntime, MultiCameraRuntime
 from app.config import ConfigurationError, MotionDetectionConfig, load_config, validate_stream_url
-from app.inference import PersonDetection, FakePersonDetector, create_person_detector
+from app.inference import InferenceGate, PersonDetection, FakePersonDetector, create_person_detector
 from app.metrics import ResourceSnapshot, read_resource_snapshot
 from app.video.fake_source import FakeVideoSource
 from app.video.motion import MotionDetector
@@ -45,6 +45,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--warmup", type=float, default=1.0)
     parser.add_argument("--scenario", choices=SCENARIOS, default="none")
+    parser.add_argument(
+        "--parallel-inference",
+        type=int,
+        default=0,
+        help="0=production auto policy; positive values force an inference gate width for benchmarking",
+    )
+    parser.add_argument(
+        "--fake-inference-ms",
+        type=float,
+        default=0.0,
+        help="synthetic detector latency used only in --mode fake",
+    )
     parser.add_argument("--json", action="store_true")
     return parser.parse_args()
 
@@ -58,6 +70,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--warmup cannot be negative")
     if args.mode == "real" and args.config is None:
         raise ValueError("--mode real requires --config")
+    if args.parallel_inference < 0:
+        raise ValueError("--parallel-inference cannot be negative")
+    if args.fake_inference_ms < 0:
+        raise ValueError("--fake-inference-ms cannot be negative")
 
 
 def _person_detection(value: int) -> list[PersonDetection]:
@@ -72,8 +88,14 @@ def _person_detection(value: int) -> list[PersonDetection]:
     ]
 
 
-def _fake_runtimes(count: int, scenario: str) -> tuple[list[CameraRuntime], FakePersonDetector]:
+def _fake_runtimes(
+    count: int,
+    scenario: str,
+    inference_ms: float = 0.0,
+) -> tuple[list[CameraRuntime], FakePersonDetector]:
     def detect(frame: np.ndarray) -> list[PersonDetection]:
+        if inference_ms:
+            time.sleep(inference_ms / 1000.0)
         return _person_detection(int(frame[0, 0, 0]))
 
     detector = FakePersonDetector(callback=detect)
@@ -195,8 +217,14 @@ def _measure_level(
     scenario: str,
     duration: float,
     warmup: float,
+    parallel_inference: int = 0,
 ) -> ScalabilityLevelReport:
-    fleet = MultiCameraRuntime(runtimes, detector=detector)  # type: ignore[arg-type]
+    gate = InferenceGate(max_parallel=parallel_inference) if parallel_inference > 0 else None
+    fleet = MultiCameraRuntime(  # type: ignore[arg-type]
+        runtimes,
+        detector=detector,
+        inference_gate=gate,
+    )
     resource_samples: list[ResourceSnapshot] = []
     queue_max = {runtime.camera_id: 0 for runtime in runtimes}
     fleet.start()
@@ -255,15 +283,21 @@ def run_scalability(
     warmup: float,
     scenario: str,
     config: Path | None = None,
+    parallel_inference: int = 0,
+    fake_inference_ms: float = 0.0,
 ) -> ScalabilityReport:
     if mode not in {"fake", "real"}:
         raise ValueError("mode must be fake or real")
     if not 1 <= max_cameras <= 6:
         raise ValueError("max_cameras must be between 1 and 6")
+    if parallel_inference < 0:
+        raise ValueError("parallel_inference cannot be negative")
+    if fake_inference_ms < 0:
+        raise ValueError("fake_inference_ms cannot be negative")
     levels: list[ScalabilityLevelReport] = []
     for count in range(1, max_cameras + 1):
         if mode == "fake":
-            runtimes, detector = _fake_runtimes(count, scenario)
+            runtimes, detector = _fake_runtimes(count, scenario, fake_inference_ms)
             levels.append(
                 _measure_level(
                     runtimes,
@@ -273,6 +307,7 @@ def run_scalability(
                     scenario=scenario,
                     duration=duration,
                     warmup=warmup,
+                    parallel_inference=parallel_inference,
                 )
             )
             continue
@@ -342,6 +377,8 @@ def main() -> int:
             warmup=args.warmup,
             scenario=args.scenario,
             config=args.config,
+            parallel_inference=args.parallel_inference,
+            fake_inference_ms=args.fake_inference_ms,
         )
     except (ConfigurationError, OSError, RuntimeError, ValueError) as exc:
         print(f"SCALABILITY ERROR: {exc}", file=sys.stderr)
