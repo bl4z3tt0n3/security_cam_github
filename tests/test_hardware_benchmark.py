@@ -6,6 +6,8 @@ import yaml
 
 from scripts.benchmark_intel_hardware import (
     _apply_recommendation,
+    _decode_performance_delta,
+    _model_performance_delta,
     _recommend_decode,
 )
 
@@ -110,3 +112,66 @@ def test_apply_recommendation_writes_local_profile_without_destroying_other_sect
     assert document["inference"]["person_detection_fps"] == 2.0
     assert document["video"]["hardware_acceleration"] == "d3d11"
     assert document["custom_section"] == {"preserve": True}
+
+def test_model_performance_delta_reports_throughput_gain() -> None:
+    baseline_candidate = {
+        "name": "yolo26s-640-1stream",
+        "model": "models/yolo26s.pt",
+        "image_size": 640,
+        "performance_mode": "latency",
+        "num_streams": 1,
+        "num_requests": 1,
+    }
+    selected_candidate = {
+        "name": "yolo26s-640-2stream",
+        "model": "models/yolo26s.pt",
+        "image_size": 640,
+        "performance_mode": "throughput",
+        "num_streams": 2,
+        "num_requests": 2,
+    }
+    result = _model_performance_delta(
+        [
+            {
+                "candidate": baseline_candidate,
+                "raw_openvino": {"throughput_fps": 10.0},
+                "end_to_end": {"mean_ms": 80.0},
+            },
+            {
+                "candidate": selected_candidate,
+                "raw_openvino": {"throughput_fps": 15.0},
+                "end_to_end": {"mean_ms": 85.0},
+            },
+        ],
+        {"candidate": selected_candidate},
+    )
+
+    assert result is not None
+    assert result["aggregate_throughput_gain_percent"] == 50.0
+    assert result["aggregate_throughput_multiplier"] == 1.5
+    assert result["single_call_latency_change_percent"] == 6.2
+
+
+def test_decode_performance_delta_reports_cpu_reduction() -> None:
+    result = _decode_performance_delta(
+        [
+            {
+                "requested": "none",
+                "actual": "none",
+                "decoded_fps": 30.0,
+                "process_cpu_percent": 80.0,
+            },
+            {
+                "requested": "mfx",
+                "actual": "mfx",
+                "decoded_fps": 30.0,
+                "process_cpu_percent": 48.0,
+            },
+        ],
+        {"requested": "mfx"},
+    )
+
+    assert result is not None
+    assert result["process_cpu_reduction_percent"] == 40.0
+    assert result["decoded_fps_change_percent"] == 0.0
+
