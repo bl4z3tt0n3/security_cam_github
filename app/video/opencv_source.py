@@ -169,26 +169,33 @@ def _default_capture_factory(
         )
 
     if backend in {"auto", "ffmpeg"} and hasattr(cv2, "CAP_FFMPEG"):
-        acceleration = _hardware_acceleration_value(hardware_acceleration)
         prop = getattr(cv2, "CAP_PROP_HW_ACCELERATION", None)
-        if (
-            hardware_acceleration != "none"
-            and acceleration is not None
-            and prop is not None
-        ):
-            try:
-                capture = cv2.VideoCapture(
-                    url,
-                    cv2.CAP_FFMPEG,
-                    [int(prop), int(acceleration)],
-                )
-                if capture.isOpened():
-                    return capture
-                capture.release()
-            except (TypeError, cv2.error):
-                # Hardware acceleration is an optional optimization. Retry the
-                # same FFmpeg stream in software before changing backends.
-                pass
+        requested = str(hardware_acceleration).strip().lower()
+        candidates = (
+            ("mfx", "d3d11", "auto")
+            if requested == "auto"
+            else (() if requested == "none" else (requested,))
+        )
+        if prop is not None:
+            attempted_values: set[int] = set()
+            for candidate in candidates:
+                acceleration = _hardware_acceleration_value(candidate)
+                if acceleration is None or int(acceleration) in attempted_values:
+                    continue
+                attempted_values.add(int(acceleration))
+                try:
+                    capture = cv2.VideoCapture(
+                        url,
+                        cv2.CAP_FFMPEG,
+                        [int(prop), int(acceleration)],
+                    )
+                    if capture.isOpened():
+                        return capture
+                    capture.release()
+                except (TypeError, cv2.error):
+                    # Hardware decode is an optimization only; continue through
+                    # the Intel/D3D11 candidate chain before software fallback.
+                    continue
 
         capture = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
         if capture.isOpened() or backend == "ffmpeg":
@@ -196,7 +203,6 @@ def _default_capture_factory(
         capture.release()
 
     return cv2.VideoCapture(url)
-
 
 class OpenCVVideoSource(VideoSource):
     """Decode a stream on one reader thread and expose only recent frames."""
