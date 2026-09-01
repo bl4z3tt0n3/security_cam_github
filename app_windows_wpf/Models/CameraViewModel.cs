@@ -94,6 +94,11 @@ public sealed class CameraViewModel : INotifyPropertyChanged, IDisposable
         {
             details.Add(snapshot.Codec!);
         }
+        if (!string.IsNullOrWhiteSpace(snapshot.HardwareAcceleration)
+            && !snapshot.HardwareAcceleration.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+        {
+            details.Add($"HW {snapshot.HardwareAcceleration}");
+        }
         if (snapshot.LastFrameAgeSeconds is not null)
         {
             details.Add($"ultimo frame {snapshot.LastFrameAgeSeconds.Value:0.0}s");
