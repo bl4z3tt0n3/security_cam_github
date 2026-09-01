@@ -97,6 +97,8 @@ class ScrfdFaceDetector(FaceDetector):
         self._input_width, self._input_height = input_size
         if self._input_width <= 0 or self._input_height <= 0:
             raise ValueError("SCRFD input size must be positive")
+        self._padded = np.empty((self._input_height, self._input_width, 3), dtype=np.uint8)
+        self._center_cache: dict[tuple[int, bool], np.ndarray] = {}
         self._session_factory = session_factory
         self._session: Any | None = None
         self._input_name = ""
@@ -157,7 +159,8 @@ class ScrfdFaceDetector(FaceDetector):
         resized_width = max(1, int(round(width * scale)))
         resized_height = max(1, int(round(height * scale)))
         resized = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR)
-        padded = np.zeros((self._input_height, self._input_width, 3), dtype=np.uint8)
+        padded = self._padded
+        padded.fill(0)
         padded[:resized_height, :resized_width] = resized
         tensor = cv2.dnn.blobFromImage(
             padded,
@@ -179,6 +182,23 @@ class ScrfdFaceDetector(FaceDetector):
             raise FaceDetectorError(f"SCRFD output cannot be reshaped to columns={columns}")
         return array.reshape(-1, columns)
 
+    def _centers_for_stride(self, stride: int, *, doubled: bool) -> np.ndarray:
+        key = (stride, doubled)
+        cached = self._center_cache.get(key)
+        if cached is not None:
+            return cached
+        grid_width = math.ceil(self._input_width / stride)
+        grid_height = math.ceil(self._input_height / stride)
+        centers = np.stack(
+            np.meshgrid(np.arange(grid_width), np.arange(grid_height)), axis=-1
+        ).reshape(-1, 2).astype(np.float32)
+        centers *= stride
+        if doubled:
+            centers = np.repeat(centers, 2, axis=0)
+        centers.setflags(write=False)
+        self._center_cache[key] = centers
+        return centers
+
     def _decode_feature_outputs(
         self,
         outputs: Sequence[Any],
@@ -194,13 +214,12 @@ class ScrfdFaceDetector(FaceDetector):
             box = self._rows(outputs[index + 3], 4)
             if len(score) != len(box):
                 raise FaceDetectorError(f"SCRFD score/bbox length mismatch at stride {stride}")
-            grid_width = math.ceil(self._input_width / stride)
-            grid_height = math.ceil(self._input_height / stride)
-            centers = np.stack(
-                np.meshgrid(np.arange(grid_width), np.arange(grid_height)), axis=-1
-            ).reshape(-1, 2).astype(np.float32) * stride
-            if len(box) == len(centers) * 2:
-                centers = np.repeat(centers, 2, axis=0)
+            base_centers = self._centers_for_stride(stride, doubled=False)
+            centers = (
+                self._centers_for_stride(stride, doubled=True)
+                if len(box) == len(base_centers) * 2
+                else base_centers
+            )
             if len(box) != len(centers):
                 raise FaceDetectorError(
                     f"SCRFD stride {stride} has {len(box)} boxes; expected {len(centers)}"
@@ -394,8 +413,19 @@ class OpenVINOFaceDetector0205(FaceDetector):
         if self._compiled is None:
             self.load()
         assert self._compiled is not None
-        resized = cv2.resize(image, (self._input_width, self._input_height), interpolation=cv2.INTER_LINEAR)
-        tensor = np.transpose(resized.astype(np.float32), (2, 0, 1))[None, ...]
+        resized = cv2.resize(
+            image,
+            (self._input_width, self._input_height),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        tensor = cv2.dnn.blobFromImage(
+            resized,
+            scalefactor=1.0,
+            size=(self._input_width, self._input_height),
+            mean=(0.0, 0.0, 0.0),
+            swapRB=False,
+            crop=False,
+        )
         try:
             raw = self._compiled({self._input_name: tensor}) if self._input_name else self._compiled(tensor)
         except Exception as exc:
