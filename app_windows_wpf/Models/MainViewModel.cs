@@ -4,7 +4,7 @@ using System.Runtime.CompilerServices;
 
 namespace LocalSecurityMonitor.Wpf.Models;
 
-public sealed class MainViewModel : INotifyPropertyChanged
+public sealed class MainViewModel : INotifyPropertyChanged, IDisposable
 {
     private CameraViewModel? _selectedCamera;
     private string _connectionStatus = "Avvio del backend locale…";
@@ -124,6 +124,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
     public void Initialize(HelloData hello)
     {
+        foreach (var camera in Cameras)
+        {
+            camera.Dispose();
+        }
         Cameras.Clear();
         foreach (var camera in hello.Cameras.OrderBy(value => value.SlotIndex))
         {
@@ -175,6 +179,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         field = value;
         OnPropertyChanged(propertyName);
         return true;
+    }
+
+    public void Dispose()
+    {
+        foreach (var camera in Cameras)
+        {
+            camera.Dispose();
+        }
+        Cameras.Clear();
     }
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null) =>
