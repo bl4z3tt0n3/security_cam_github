@@ -151,6 +151,8 @@ hardware_optimization:
   profile: intel_iris_xe
   adaptive_person_detection: true
   force_face_cpu: true
+  # auto = prova MFX/Quick Sync, poi D3D11, poi software.
+  decode_acceleration: auto
   gpu_performance_mode: throughput
   gpu_streams: 2
   gpu_num_requests: 2
