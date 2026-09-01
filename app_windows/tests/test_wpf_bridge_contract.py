@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import mmap
 import os
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -15,7 +16,7 @@ from app_windows.shared_preview import (
     FRAME_VERSION,
     SharedFramePublisher,
 )
-from app_windows.wpf_bridge import face_capability_rows
+from app_windows.wpf_bridge import BridgeRuntime, face_capability_rows
 
 
 def test_face_capability_rows_serializes_dataclasses_for_wpf() -> None:
@@ -121,4 +122,16 @@ def test_shared_frame_publisher_exposes_consistent_raw_bgr_frame() -> None:
             assert view.read(stored_bytes) == frame.tobytes()
     finally:
         publisher.close()
+
+def test_background_preview_thumbnail_uses_profile_width_without_binding_error() -> None:
+    runtime = SimpleNamespace(
+        _config=SimpleNamespace(
+            windows_ui=SimpleNamespace(background_preview_max_width=480)
+        )
+    )
+    frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+    resized = BridgeRuntime._thumbnail_frame(runtime, frame)
+
+    assert resized.shape == (270, 480, 3)
 
