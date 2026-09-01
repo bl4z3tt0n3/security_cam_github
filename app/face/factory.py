@@ -232,8 +232,6 @@ def create_face_embedder(
             recognizer_id=recognizer_id,
             alignment_template=template,
             default_threshold=config.threshold,
-            cpu_threads=config.openvino_cpu_threads,
-            max_process_ram_mb=config.max_process_ram_mb,
         )
     raise FaceEmbeddingError(f"unsupported face recognizer backend: {backend}")
 
