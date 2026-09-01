@@ -464,17 +464,20 @@ class CameraWorker:
                         self._frames_received += 1
                         self._last_received_at_utc = result.packet.received_at_utc
                     dropped = self._buffer.put(result.packet)
-                    log_event(
-                        self._logger,
-                        logging.DEBUG,
-                        "worker_frame_published",
-                        camera=self._camera_id,
-                        status=result.status.value,
-                        sequence=result.packet.sequence,
-                        buffer_size=self._buffer.size,
-                        dropped=dropped,
-                        last_frame_age=f"{max(0.0, now - result.packet.received_monotonic):.3f}s",
-                    )
+                    if self._logger.isEnabledFor(logging.DEBUG):
+                        log_event(
+                            self._logger,
+                            logging.DEBUG,
+                            "worker_frame_published",
+                            camera=self._camera_id,
+                            status=result.status.value,
+                            sequence=result.packet.sequence,
+                            buffer_size=self._buffer.size,
+                            dropped=dropped,
+                            last_frame_age=(
+                                f"{max(0.0, now - result.packet.received_monotonic):.3f}s"
+                            ),
+                        )
                     last_frame_monotonic = result.packet.received_monotonic
                     if awaiting_first_frame:
                         awaiting_first_frame = False
