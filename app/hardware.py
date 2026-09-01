@@ -82,7 +82,7 @@ def process_rss_mb() -> float:
 
 
 def ensure_process_memory_budget(limit_mb: int, *, stage: str) -> None:
-    """Fail before loading another model if the configured process budget is exhausted."""
+    """Protect both process RSS and system RAM shared with an integrated GPU."""
 
     if limit_mb <= 0:
         return
@@ -91,6 +91,16 @@ def ensure_process_memory_budget(limit_mb: int, *, stage: str) -> None:
         raise MemoryError(
             f"{stage} refused: process RSS {rss:.0f} MiB reached the "
             f"configured {limit_mb} MiB budget"
+        )
+
+    # Iris Xe uses shared system memory. RSS alone does not capture GPU pressure,
+    # so keep a reserve for Windows, WPF, decoder surfaces and the iGPU driver.
+    minimum_available_mb = max(1024, min(4096, int(limit_mb) // 2))
+    available_mb = psutil.virtual_memory().available / (1024.0 * 1024.0)
+    if available_mb < minimum_available_mb:
+        raise MemoryError(
+            f"{stage} refused: only {available_mb:.0f} MiB system RAM is available; "
+            f"the integrated-GPU profile reserves {minimum_available_mb} MiB"
         )
 
 
