@@ -15,6 +15,8 @@ import math
 import cv2
 import numpy as np
 
+from app.hardware import ensure_process_memory_budget, resolve_cpu_thread_budget
+
 from .base import (
     FaceDetection,
     FaceDetector,
@@ -87,6 +89,8 @@ class ScrfdFaceDetector(FaceDetector):
         session: Any | None = None,
         session_factory: Callable[..., Any] | None = None,
         input_size: tuple[int, int] = (640, 640),
+        cpu_threads: int = 0,
+        max_process_ram_mb: int = 0,
     ) -> None:
         self._model_path = Path(model_path).expanduser()
         self._confidence_threshold = _validate_threshold(confidence_threshold)
@@ -95,6 +99,8 @@ class ScrfdFaceDetector(FaceDetector):
         if self._device_requested not in {"auto", "cpu", "cuda"}:
             raise ValueError("SCRFD device must be one of: auto, cpu, cuda")
         self._input_width, self._input_height = input_size
+        self._cpu_threads = int(cpu_threads)
+        self._max_process_ram_mb = int(max_process_ram_mb)
         if self._input_width <= 0 or self._input_height <= 0:
             raise ValueError("SCRFD input size must be positive")
         self._padded = np.empty((self._input_height, self._input_width, 3), dtype=np.uint8)
@@ -128,10 +134,23 @@ class ScrfdFaceDetector(FaceDetector):
             available = tuple(ort.get_available_providers())
             selected = _select_provider(self._device_requested, available)
             factory = self._session_factory or ort.InferenceSession
-            self._configure_session(
-                factory(str(self._model_path), providers=[selected]),
-                requested=selected,
-            )
+            kwargs: dict[str, Any] = {"providers": [selected]}
+            if selected == CPU_PROVIDER:
+                ensure_process_memory_budget(
+                    self._max_process_ram_mb,
+                    stage="SCRFD ONNX Runtime load",
+                )
+                options = ort.SessionOptions()
+                options.intra_op_num_threads = resolve_cpu_thread_budget(self._cpu_threads)
+                options.inter_op_num_threads = 1
+                kwargs["sess_options"] = options
+            try:
+                session = factory(str(self._model_path), **kwargs)
+            except TypeError:
+                # Small injected test factories may not expose SessionOptions.
+                kwargs.pop("sess_options", None)
+                session = factory(str(self._model_path), **kwargs)
+            self._configure_session(session, requested=selected)
         except FaceDetectorError:
             raise
         except Exception as exc:
