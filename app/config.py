@@ -440,6 +440,7 @@ class HardwareOptimizationConfig(BaseModel):
     profile: Literal["none", "intel_iris_xe"] = "none"
     adaptive_person_detection: bool = True
     force_face_cpu: bool = True
+    decode_acceleration: Literal["auto", "none", "mfx", "d3d11"] = "auto"
     gpu_performance_mode: Literal["latency", "throughput"] = "throughput"
     gpu_streams: int = Field(default=2, ge=0, le=8)
     gpu_num_requests: int = Field(default=2, ge=0, le=16)
