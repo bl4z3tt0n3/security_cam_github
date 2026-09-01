@@ -39,7 +39,7 @@ def test_example_configuration_loads() -> None:
     assert config.video.rtsp_transport == "tcp"
     assert config.video.max_reconnect_attempts == 0
     assert config.video.max_buffer_frames == 1
-    assert config.video.hardware_acceleration == "mfx"
+    assert config.video.hardware_acceleration == "auto"
     assert config.inference.person_detection_fps == 3
     assert config.person_detection.inference_fps == 3
     assert config.person_detection.enabled is False
