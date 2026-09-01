@@ -146,8 +146,14 @@ public sealed class SnapshotData
     [JsonPropertyName("frame_sequence")]
     public long? FrameSequence { get; set; }
 
-    [JsonPropertyName("frame_base64")]
-    public string? FrameBase64 { get; set; }
+    [JsonPropertyName("frame_shm_name")]
+    public string? FrameSharedMemoryName { get; set; }
+
+    [JsonPropertyName("frame_byte_count")]
+    public int? FrameByteCount { get; set; }
+
+    [JsonPropertyName("frame_stride")]
+    public int? FrameStride { get; set; }
 
     [JsonPropertyName("frame_width")]
     public int? FrameWidth { get; set; }
