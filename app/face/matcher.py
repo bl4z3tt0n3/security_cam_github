@@ -111,11 +111,13 @@ class FaceMatcher:
         self.metrics = metrics
         self.inference_gate = inference_gate
         self._records: tuple[PersonRecord, ...] = ()
-        self._gallery_matrix = np.empty(
-            (0, self.embedder.metadata.embedding_dimension),
-            dtype=np.float32,
+        self._gallery_snapshot: tuple[np.ndarray, tuple[PersonRecord, ...]] = (
+            np.empty(
+                (0, self.embedder.metadata.embedding_dimension),
+                dtype=np.float32,
+            ),
+            (),
         )
-        self._gallery_owners: tuple[PersonRecord, ...] = ()
         self.refresh()
 
     @property
@@ -149,8 +151,7 @@ class FaceMatcher:
         # succeeded. Matching can snapshot these references without repeatedly
         # normalizing all enrolled embeddings.
         self._records = records
-        self._gallery_matrix = matrix
-        self._gallery_owners = tuple(owners)
+        self._gallery_snapshot = (matrix, tuple(owners))
         return records
 
     def match(self, face_image: np.ndarray) -> RecognitionResult:
@@ -199,8 +200,7 @@ class FaceMatcher:
 
         matching_started = time.perf_counter()
         try:
-            gallery = self._gallery_matrix
-            owners = self._gallery_owners
+            gallery, owners = self._gallery_snapshot
             best_record: PersonRecord | None = None
             best_score: float | None = None
             if gallery.shape[0]:
