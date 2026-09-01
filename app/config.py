@@ -87,6 +87,11 @@ class PersonDetectionConfig(BaseModel):
     device: Literal["auto", "cpu", "gpu", "cuda"] = "auto"
     fallback_device: Literal["none", "cpu"] = "none"
     image_size: int = Field(default=640, gt=0, le=2048)
+    openvino_performance_mode: Literal["latency", "throughput"] = "latency"
+    openvino_num_streams: int = Field(default=0, ge=0, le=16)
+    openvino_num_requests: int = Field(default=0, ge=0, le=64)
+    openvino_cpu_threads: int = Field(default=0, ge=0, le=256)
+    max_process_ram_mb: int = Field(default=0, ge=0, le=131072)
     classes: list[str] = Field(default_factory=lambda: ["person"])
     prompts: list[str] = Field(default_factory=lambda: ["person"])
     show_masks: bool = False
@@ -226,6 +231,9 @@ class FaceDetectionConfig(BaseModel):
     nms_threshold: float = Field(default=0.4, ge=0, le=1)
     device: Literal["auto", "cpu", "gpu", "cuda", "npu"] = "auto"
     inference_fps: float = Field(default=2.0, gt=0, le=60)
+    openvino_performance_mode: Literal["latency", "throughput"] = "latency"
+    openvino_cpu_threads: int = Field(default=0, ge=0, le=256)
+    max_process_ram_mb: int = Field(default=0, ge=0, le=131072)
 
     @model_validator(mode="before")
     @classmethod
@@ -302,6 +310,9 @@ class FaceLandmarksConfig(BaseModel):
     landmarker_id: str = "landmarks-regression-retail-0009"
     backend: Literal["openvino"] = "openvino"
     device: Literal["auto", "cpu", "gpu", "npu"] = "auto"
+    openvino_performance_mode: Literal["latency", "throughput"] = "latency"
+    openvino_cpu_threads: int = Field(default=0, ge=0, le=256)
+    max_process_ram_mb: int = Field(default=0, ge=0, le=131072)
 
     @model_validator(mode="after")
     def validate_enabled_model(self) -> "FaceLandmarksConfig":
@@ -340,6 +351,9 @@ class RecognitionConfig(BaseModel):
     min_confirmations: int = Field(default=2, ge=1)
     confirmation_window_seconds: float = Field(default=10.0, gt=0, le=300)
     inference_fps: float = Field(default=1.0, gt=0, le=30)
+    openvino_performance_mode: Literal["latency", "throughput"] = "latency"
+    openvino_cpu_threads: int = Field(default=0, ge=0, le=256)
+    max_process_ram_mb: int = Field(default=0, ge=0, le=131072)
 
     @model_validator(mode="before")
     @classmethod
@@ -416,6 +430,31 @@ class LoggingConfig(BaseModel):
     level: str = "INFO"
 
 
+class HardwareOptimizationConfig(BaseModel):
+    """Conservative profile for a local Intel i7 + Iris Xe + 16 GB system."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    profile: Literal["none", "intel_iris_xe"] = "none"
+    adaptive_person_detection: bool = True
+    force_face_cpu: bool = True
+    gpu_performance_mode: Literal["latency", "throughput"] = "throughput"
+    gpu_streams: int = Field(default=2, ge=0, le=8)
+    gpu_num_requests: int = Field(default=2, ge=0, le=16)
+    cpu_threads: int = Field(default=0, ge=0, le=256)
+    max_process_ram_mb: int = Field(default=6144, ge=1024, le=32768)
+    background_preview_fps: float = Field(default=5.0, gt=0, le=30)
+    background_preview_max_width: int = Field(default=480, ge=160, le=1920)
+
+    @field_validator("background_preview_fps")
+    @classmethod
+    def validate_background_preview_fps(cls, value: float) -> float:
+        if not math.isfinite(value):
+            raise ValueError("hardware_optimization.background_preview_fps must be finite")
+        return value
+
+
 class WindowsUiConfig(BaseModel):
     """Configuration that affects only the local Windows monitor UI."""
 
@@ -425,6 +464,8 @@ class WindowsUiConfig(BaseModel):
     start_maximized: bool = True
     remember_window_geometry: bool = True
     show_person_boxes: bool = True
+    background_preview_fps: float = Field(default=5.0, gt=0, le=30)
+    background_preview_max_width: int = Field(default=480, ge=160, le=1920)
 
     @field_validator("display_fps")
     @classmethod
@@ -451,6 +492,9 @@ class AppConfig(BaseModel):
     recording: RecordingConfig = Field(default_factory=RecordingConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
+    hardware_optimization: HardwareOptimizationConfig = Field(
+        default_factory=HardwareOptimizationConfig
+    )
     windows_ui: WindowsUiConfig = Field(default_factory=WindowsUiConfig)
 
     @model_validator(mode="before")
@@ -489,6 +533,14 @@ class AppConfig(BaseModel):
 
         self.person_detection.inference_fps = self.inference.person_detection_fps
         return self
+
+    @model_validator(mode="after")
+    def apply_requested_hardware_profile(self) -> "AppConfig":
+        """Apply opt-in hardware policy after all canonical settings are validated."""
+
+        from app.hardware import apply_hardware_profile
+
+        return apply_hardware_profile(self)
 
     @model_validator(mode="after")
     def validate_face_dependencies(self) -> "AppConfig":
