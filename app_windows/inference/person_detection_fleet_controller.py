@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import logging
+import math
 from pathlib import Path
 import threading
 import time
@@ -34,6 +35,8 @@ class FleetPersonDetectionController(QObject):
     """Run one shared person detector across every already-open camera provider."""
 
     snapshot_changed = Signal(object)
+    _LOAD_RETRY_MIN_S = 0.5
+    _LOAD_RETRY_MAX_S = 8.0
 
     def __init__(
         self,
@@ -54,6 +57,8 @@ class FleetPersonDetectionController(QObject):
         self._snapshots: dict[str, PersonDetectionSnapshot] = {}
         self._metrics: dict[str, CameraMetrics] = {}
         self._pipelines: dict[str, CameraTrackingPipeline] = {}
+        self._source_sessions: dict[str, int] = {}
+        self._provider_markers: dict[str, tuple[object, ...]] = {}
         self._lock = threading.RLock()
         self._wake = threading.Event()
         self._stop_event = threading.Event()
@@ -132,6 +137,75 @@ class FleetPersonDetectionController(QObject):
             self._settings_generation += 1
         self._wake.set()
 
+    @staticmethod
+    def _provider_marker(provider: InferenceFrameSource) -> tuple[object, ...]:
+        """Return a cheap source-session marker, including reconnects when exposed."""
+
+        marker: list[object] = [id(provider)]
+        snapshot_method = getattr(provider, "snapshot", None)
+        if callable(snapshot_method):
+            try:
+                snapshot = snapshot_method()
+                worker = getattr(snapshot, "worker", None)
+                reconnect_count = getattr(worker, "reconnect_count", None)
+                if reconnect_count is not None:
+                    marker.append(("reconnect_count", int(reconnect_count)))
+            except Exception:
+                # Session invalidation must never make frame acquisition fail.
+                pass
+        for attribute in ("session_generation", "source_generation"):
+            value = getattr(provider, attribute, None)
+            if value is not None:
+                try:
+                    marker.append((attribute, int(value)))
+                except (TypeError, ValueError):
+                    marker.append((attribute, str(value)))
+        return tuple(marker)
+
+    def _invalidate_source_locked(self, camera_id: str, *, reason: str) -> int:
+        self._source_sessions[camera_id] = self._source_sessions.get(camera_id, 0) + 1
+        self._source_generation += 1
+        pipeline = self._pipelines.get(camera_id)
+        if pipeline is not None:
+            pipeline.reset(reason=reason)
+        return self._source_sessions[camera_id]
+
+    def invalidate_source(self, camera_id: str, *, reason: str = "camera source reconnected") -> None:
+        """Explicitly invalidate per-camera tracking/recognition state on reconnect."""
+
+        normalized = camera_id.strip()
+        if not normalized:
+            return
+        with self._lock:
+            if normalized not in self._providers:
+                return
+            self._provider_markers[normalized] = self._provider_marker(
+                self._providers[normalized]
+            )
+            self._invalidate_source_locked(normalized, reason=reason)
+        self._wake.set()
+
+    def _observe_provider_marker(
+        self,
+        camera_id: str,
+        provider: InferenceFrameSource,
+    ) -> int:
+        marker = self._provider_marker(provider)
+        with self._lock:
+            if self._providers.get(camera_id) is not provider:
+                return -1
+            previous = self._provider_markers.get(camera_id)
+            if previous is None:
+                self._provider_markers[camera_id] = marker
+                self._source_sessions.setdefault(camera_id, 1)
+            elif previous != marker:
+                self._provider_markers[camera_id] = marker
+                self._invalidate_source_locked(
+                    camera_id,
+                    reason="camera source reconnect/session changed",
+                )
+            return self._source_sessions.get(camera_id, 1)
+
     def set_sources(self, providers: Mapping[str, InferenceFrameSource]) -> None:
         """Replace the provider view without opening/stopping any stream."""
 
@@ -140,17 +214,38 @@ class FleetPersonDetectionController(QObject):
             for camera_id, provider in providers.items()
             if provider is not None
         }
+        markers = {key: self._provider_marker(value) for key, value in normalized.items()}
         with self._lock:
-            changed = (
-                set(self._providers) != set(normalized)
-                or any(self._providers.get(key) is not value for key, value in normalized.items())
-            )
+            previous = dict(self._providers)
+            changed = set(previous) != set(normalized)
+            for camera_id, provider in normalized.items():
+                old_provider = previous.get(camera_id)
+                old_marker = self._provider_markers.get(camera_id)
+                new_marker = markers[camera_id]
+                if old_provider is None:
+                    self._source_sessions[camera_id] = max(
+                        1, self._source_sessions.get(camera_id, 0)
+                    )
+                elif old_provider is not provider or old_marker != new_marker:
+                    self._invalidate_source_locked(
+                        camera_id,
+                        reason="camera provider/session replaced",
+                    )
+                    changed = True
+                self._provider_markers[camera_id] = new_marker
             self._providers = normalized
-            if changed:
-                self._source_generation += 1
-            removed = set(self._pipelines).difference(normalized)
+            removed = set(previous).difference(normalized)
             for camera_id in removed:
                 self._pipelines.pop(camera_id, None)
+                self._provider_markers.pop(camera_id, None)
+                self._source_sessions.pop(camera_id, None)
+                self._snapshots.pop(camera_id, None)
+            if changed and not removed:
+                # Per-camera invalidations already increment the global source
+                # generation.  Key-set additions still need one global bump.
+                added = set(normalized).difference(previous)
+                if added:
+                    self._source_generation += 1
         self._wake.set()
 
     def set_active_camera(
@@ -164,7 +259,20 @@ class FleetPersonDetectionController(QObject):
         with self._lock:
             self._active_camera_id = normalized
             if normalized is not None and provider is not None:
+                old = self._providers.get(normalized)
+                marker = self._provider_marker(provider)
+                if old is None:
+                    self._source_sessions[normalized] = max(
+                        1, self._source_sessions.get(normalized, 0)
+                    )
+                    self._source_generation += 1
+                elif old is not provider or self._provider_markers.get(normalized) != marker:
+                    self._invalidate_source_locked(
+                        normalized,
+                        reason="active camera provider/session replaced",
+                    )
                 self._providers[normalized] = provider
+                self._provider_markers[normalized] = marker
         self._wake.set()
 
     def _state(self):
@@ -174,6 +282,7 @@ class FleetPersonDetectionController(QObject):
                 dict(self._providers),
                 self._settings_generation,
                 self._source_generation,
+                dict(self._source_sessions),
             )
 
     def _resolve_model_path(self, model: str | None) -> Path | None:
@@ -184,6 +293,8 @@ class FleetPersonDetectionController(QObject):
 
     @staticmethod
     def _model_signature(settings: PersonDetectionSettings) -> tuple[object, ...]:
+        """Fields that actually require rebuilding the detector instance."""
+
         return (
             settings.enabled,
             settings.backend,
@@ -199,10 +310,40 @@ class FleetPersonDetectionController(QObject):
             settings.max_process_ram_mb,
             settings.classes,
             settings.prompts,
+            # Threshold is part of backend config, so lowering it cannot be
+            # implemented safely by post-filtering an already-stricter model.
             settings.confidence_threshold,
-            settings.inference_fps,
             settings.show_masks,
         )
+
+    @classmethod
+    def _recoverable_load_error(cls, exc: BaseException) -> bool:
+        if isinstance(exc, (MemoryError, TimeoutError)):
+            return True
+        text = f"{type(exc).__name__}: {exc}".casefold()
+        return any(
+            token in text
+            for token in (
+                "out of memory",
+                "cannot allocate",
+                "insufficient memory",
+                "resource temporarily",
+                "device busy",
+            )
+        )
+
+    @staticmethod
+    def _next_deadline(previous_due: float, completed_at: float, fps: float) -> float:
+        """Advance a target-frequency deadline without replaying missed slots."""
+
+        interval = 1.0 / fps
+        if previous_due <= 0:
+            return completed_at + interval
+        deadline = previous_due + interval
+        if deadline <= completed_at:
+            missed = math.floor((completed_at - deadline) / interval) + 1
+            deadline += missed * interval
+        return deadline
 
     def _build_detector(self, settings: PersonDetectionSettings) -> PersonDetector | None:
         if not settings.enabled:
@@ -285,6 +426,10 @@ class FleetPersonDetectionController(QObject):
         detections=(),
         packet=None,
         latency_ms: float | None = None,
+        batch_duration_ms: float | None = None,
+        amortized_cost_ms: float | None = None,
+        scheduler_wait_ms: float | None = None,
+        frame_age_ms: float | None = None,
         detector_failures: int = 0,
         tracking_update=None,
         tracking_pipeline=None,
@@ -313,6 +458,10 @@ class FleetPersonDetectionController(QObject):
             precision=getattr(detector, "precision", settings.precision) if detector is not None else settings.precision,
             inference_fps=metric_snapshot.person_detection_fps,
             latency_ms=latency_ms,
+            batch_duration_ms=batch_duration_ms,
+            amortized_cost_ms=amortized_cost_ms,
+            scheduler_wait_ms=scheduler_wait_ms,
+            frame_age_ms=frame_age_ms,
             person_count=sum(item.label.casefold() == "person" for item in detections),
             detection_count=len(detections),
             detections=tuple(detections),
@@ -356,58 +505,109 @@ class FleetPersonDetectionController(QObject):
 
     def _run(self) -> None:
         detector: PersonDetector | None = None
+        requested_signature: tuple[object, ...] | None = None
         loaded_signature: tuple[object, ...] | None = None
-        loaded_generation = -1
-        observed_source_generation = -1
+        permanent_failure_signature: tuple[object, ...] | None = None
+        load_failures = 0
+        next_load_attempt = 0.0
+        observed_inference_fps: float | None = None
         last_sequences: dict[str, int] = {}
+        last_received_monotonic: dict[str, float] = {}
         next_at: dict[str, float] = {}
         failures: dict[str, int] = {}
 
         try:
             while not self._stop_event.is_set():
-                settings, providers, generation, source_generation = self._state()
+                settings, providers, _generation, _source_generation, sessions = self._state()
                 signature = self._model_signature(settings)
-                if source_generation != observed_source_generation:
-                    observed_source_generation = source_generation
-                    last_sequences.clear()
+
+                # Scheduling/view changes do not rebuild the detector or reset
+                # tracking.  A changed target FPS only re-anchors deadlines.
+                if observed_inference_fps != settings.inference_fps:
+                    observed_inference_fps = settings.inference_fps
                     next_at.clear()
 
-                if signature != loaded_signature or generation != loaded_generation:
-                    self._close_detector(detector)
-                    detector = None
-                    loaded_signature = signature
-                    loaded_generation = generation
+                if signature != requested_signature:
+                    old_requested = requested_signature
+                    requested_signature = signature
+                    permanent_failure_signature = None
+                    load_failures = 0
+                    next_load_attempt = 0.0
+                    if detector is not None and loaded_signature != signature:
+                        self._close_detector(detector)
+                        detector = None
+                        loaded_signature = None
                     last_sequences.clear()
+                    last_received_monotonic.clear()
                     next_at.clear()
                     failures.clear()
-                    for pipeline in tuple(self._pipelines.values()):
-                        pipeline.reset(reason="person model changed")
-                    if not settings.enabled:
-                        self._publish_state_for_all(
-                            settings,
-                            providers,
-                            status=PersonDetectionStatus.DISABLED,
-                            message="Rilevamento persone disabilitato",
-                        )
-                        self._wake.wait(0.15)
+                    if old_requested is not None:
+                        for pipeline in tuple(self._pipelines.values()):
+                            pipeline.reset(reason="person model changed")
+
+                if not settings.enabled:
+                    self._publish_state_for_all(
+                        settings,
+                        providers,
+                        status=PersonDetectionStatus.DISABLED,
+                        message="Rilevamento persone disabilitato",
+                    )
+                    self._wake.wait(0.15)
+                    self._wake.clear()
+                    continue
+
+                if detector is None:
+                    if permanent_failure_signature == signature:
+                        self._wake.wait(0.25)
+                        self._wake.clear()
+                        continue
+                    now = time.monotonic()
+                    if now < next_load_attempt:
+                        self._wake.wait(min(0.25, next_load_attempt - now))
                         self._wake.clear()
                         continue
                     self._publish_state_for_all(
                         settings,
                         providers,
                         status=PersonDetectionStatus.LOADING,
-                        message="Caricamento modello persone condiviso…",
+                        message=(
+                            "Caricamento modello persone condiviso…"
+                            if load_failures == 0
+                            else "Attesa risorse per nuovo tentativo di caricamento…"
+                        ),
                     )
                     try:
-                        detector = self._build_detector(settings)
+                        candidate = self._build_detector(settings)
                     except FileNotFoundError as exc:
+                        permanent_failure_signature = signature
                         self._publish_state_for_all(
                             settings,
                             providers,
                             status=PersonDetectionStatus.MODEL_MISSING,
                             message=str(exc),
                         )
+                        continue
                     except Exception as exc:
+                        if self._recoverable_load_error(exc):
+                            load_failures += 1
+                            delay = min(
+                                self._LOAD_RETRY_MAX_S,
+                                self._LOAD_RETRY_MIN_S * (2 ** (load_failures - 1)),
+                            )
+                            next_load_attempt = time.monotonic() + delay
+                            self._logger.warning(
+                                "fleet person model load temporarily unavailable; retry in %.2fs: %s",
+                                delay,
+                                exc,
+                            )
+                            self._publish_state_for_all(
+                                settings,
+                                providers,
+                                status=PersonDetectionStatus.LOADING,
+                                message=f"Risorse temporaneamente insufficienti; nuovo tentativo tra {delay:.1f}s",
+                            )
+                            continue
+                        permanent_failure_signature = signature
                         self._logger.error("fleet person model load failed: %s", exc)
                         self._publish_state_for_all(
                             settings,
@@ -415,10 +615,14 @@ class FleetPersonDetectionController(QObject):
                             status=PersonDetectionStatus.ERROR,
                             message=str(exc) or type(exc).__name__,
                         )
-                    if detector is None:
-                        self._wake.wait(0.25)
-                        self._wake.clear()
                         continue
+                    if candidate is None:
+                        permanent_failure_signature = signature
+                        continue
+                    detector = candidate
+                    loaded_signature = signature
+                    load_failures = 0
+                    next_load_attempt = 0.0
                     self._publish_state_for_all(
                         settings,
                         providers,
@@ -427,15 +631,16 @@ class FleetPersonDetectionController(QObject):
                         detector=detector,
                     )
 
-                if detector is None or not providers:
+                if not providers:
                     self._wake.wait(0.1)
                     self._wake.clear()
                     continue
 
                 now = time.monotonic()
-                due: list[tuple[str, InferenceFrameSource, object]] = []
+                due: list[tuple[str, InferenceFrameSource, object, int, float]] = []
                 for camera_id, provider in providers.items():
-                    if now < next_at.get(camera_id, 0.0):
+                    due_at = next_at.get(camera_id, 0.0)
+                    if now < due_at:
                         continue
                     try:
                         packet = provider.latest_frame()
@@ -453,9 +658,40 @@ class FleetPersonDetectionController(QObject):
                         )
                         next_at[camera_id] = now + 0.25
                         continue
-                    if packet is None or packet.sequence == last_sequences.get(camera_id):
+                    session = self._observe_provider_marker(camera_id, provider)
+                    if session < 0:
                         continue
-                    due.append((camera_id, provider, packet))
+                    current_last = last_sequences.get(camera_id)
+                    current_received = last_received_monotonic.get(camera_id)
+                    if packet is None:
+                        continue
+                    if current_last is not None and packet.sequence < current_last:
+                        self.invalidate_source(
+                            camera_id,
+                            reason="camera frame sequence restarted",
+                        )
+                        session = self._state()[4].get(camera_id, session + 1)
+                        last_sequences.pop(camera_id, None)
+                        last_received_monotonic.pop(camera_id, None)
+                        next_at.pop(camera_id, None)
+                        due_at = 0.0
+                    elif (
+                        current_received is not None
+                        and packet.sequence != current_last
+                        and packet.received_monotonic <= current_received
+                    ):
+                        self.invalidate_source(
+                            camera_id,
+                            reason="camera frame clock discontinuity",
+                        )
+                        session = self._state()[4].get(camera_id, session + 1)
+                        last_sequences.pop(camera_id, None)
+                        last_received_monotonic.pop(camera_id, None)
+                        next_at.pop(camera_id, None)
+                        due_at = 0.0
+                    if packet.sequence == last_sequences.get(camera_id):
+                        continue
+                    due.append((camera_id, provider, packet, session, due_at))
 
                 if not due:
                     self._wake.wait(0.01)
@@ -472,6 +708,7 @@ class FleetPersonDetectionController(QObject):
                     chunk = due[offset : offset + batch_size]
                     frames = [entry[2].frame for entry in chunk]
                     timestamps = [entry[2].received_at_utc for entry in chunk]
+                    started_monotonic = time.monotonic()
                     started = time.perf_counter()
                     try:
                         if len(chunk) > 1 and detector.supports_batch_inference:
@@ -485,11 +722,18 @@ class FleetPersonDetectionController(QObject):
                                 self._gate.run(detector.detect, frames[0], timestamps[0])
                             ]
                         elapsed_ms = (time.perf_counter() - started) * 1000.0
-                        per_frame_latency = elapsed_ms / max(1, len(chunk))
+                        amortized_cost_ms = elapsed_ms / max(1, len(chunk))
                     except Exception as exc:
-                        for camera_id, _provider, packet in chunk:
+                        for camera_id, provider, packet, session, _due_at in chunk:
+                            current = self._state()
+                            if (
+                                current[1].get(camera_id) is not provider
+                                or current[4].get(camera_id) != session
+                            ):
+                                continue
                             failures[camera_id] = failures.get(camera_id, 0) + 1
                             last_sequences[camera_id] = packet.sequence
+                            last_received_monotonic[camera_id] = packet.received_monotonic
                             next_at[camera_id] = time.monotonic() + 0.5
                             self._publish(
                                 self._snapshot_for(
@@ -512,27 +756,32 @@ class FleetPersonDetectionController(QObject):
                         )
                         continue
 
-                    current_settings, current_providers, current_generation, current_source_generation = self._state()
-                    if (
-                        current_generation != generation
-                        or self._model_signature(current_settings) != signature
-                        or current_source_generation != source_generation
-                    ):
-                        # Configuration/provider changes invalidate in-flight
-                        # results; the next loop uses the new fleet snapshot.
+                    current_settings, current_providers, _current_generation, _current_source_generation, current_sessions = self._state()
+                    if self._model_signature(current_settings) != signature:
+                        # A runtime-model change invalidates the whole batch.
                         continue
 
                     completed_at = time.monotonic()
-                    for (camera_id, _provider, packet), raw in zip(chunk, results, strict=True):
-                        if camera_id not in current_providers:
+                    for (camera_id, provider, packet, session, due_at), raw in zip(
+                        chunk, results, strict=True
+                    ):
+                        if (
+                            current_providers.get(camera_id) is not provider
+                            or current_sessions.get(camera_id) != session
+                        ):
+                            # A late result from an old camera session must not
+                            # update tracking, recognition confirmation or UI.
                             continue
                         detections = tuple(
                             replace(item, timestamp=packet.received_at_utc)
                             for item in raw
-                            if item.confidence >= settings.confidence_threshold
+                            if item.confidence >= current_settings.confidence_threshold
                         )
                         metrics = self._metrics_for(camera_id)
-                        metrics.record_person_detection(per_frame_latency)
+                        # Response latency is the batch wall-clock duration.  Do
+                        # not divide it by camera count; amortized cost is a
+                        # separate throughput metric below.
+                        metrics.record_person_detection(elapsed_ms)
                         pipeline = self._tracking_for(camera_id)
                         tracking_update = pipeline.update(
                             tuple(
@@ -542,17 +791,35 @@ class FleetPersonDetectionController(QObject):
                             )
                         )
                         last_sequences[camera_id] = packet.sequence
-                        next_at[camera_id] = completed_at + 1.0 / settings.inference_fps
+                        last_received_monotonic[camera_id] = packet.received_monotonic
+                        next_at[camera_id] = self._next_deadline(
+                            due_at,
+                            completed_at,
+                            current_settings.inference_fps,
+                        )
+                        scheduler_wait_ms = (
+                            max(0.0, started_monotonic - due_at) * 1000.0
+                            if due_at > 0
+                            else 0.0
+                        )
+                        frame_age_ms = max(
+                            0.0,
+                            (completed_at - packet.received_monotonic) * 1000.0,
+                        )
                         self._publish(
                             self._snapshot_for(
-                                settings,
+                                current_settings,
                                 camera_id,
                                 status=PersonDetectionStatus.RUNNING,
                                 message=f"Inferenza persone ({detector.backend}) attiva",
                                 detector=detector,
                                 detections=detections,
                                 packet=packet,
-                                latency_ms=per_frame_latency,
+                                latency_ms=elapsed_ms,
+                                batch_duration_ms=elapsed_ms,
+                                amortized_cost_ms=amortized_cost_ms,
+                                scheduler_wait_ms=scheduler_wait_ms,
+                                frame_age_ms=frame_age_ms,
                                 detector_failures=failures.get(camera_id, 0),
                                 tracking_update=tracking_update,
                                 tracking_pipeline=pipeline,
