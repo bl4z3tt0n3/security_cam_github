@@ -61,6 +61,10 @@ class CameraTrackingPipeline:
         self._metrics = metrics
         self._lock = threading.RLock()
         self._latest_update: CameraTrackingUpdate | None = None
+        # Monotonically increasing camera-session token.  Face orchestration
+        # observes this value so track IDs and cached identities can never be
+        # reused across a provider replacement/reconnect or other reset.
+        self._session_generation = 0
 
     @property
     def camera_id(self) -> str:
@@ -81,6 +85,13 @@ class CameraTrackingPipeline:
     @property
     def metrics(self) -> CameraMetrics | None:
         return self._metrics
+
+    @property
+    def session_generation(self) -> int:
+        """Return the current logical camera/tracking session token."""
+
+        with self._lock:
+            return self._session_generation
 
     @property
     def latest_update(self) -> CameraTrackingUpdate | None:
@@ -119,6 +130,7 @@ class CameraTrackingPipeline:
             reset_tracker()
         self._latest_update = None
         self._state_machine.reset(reason=reason)
+        self._session_generation += 1
         if self._metrics is not None:
             self._metrics.set_active_tracks(0)
 
