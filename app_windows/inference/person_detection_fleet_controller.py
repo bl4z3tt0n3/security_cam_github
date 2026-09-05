@@ -518,7 +518,7 @@ class FleetPersonDetectionController(QObject):
 
         try:
             while not self._stop_event.is_set():
-                settings, providers, _generation, _source_generation, sessions = self._state()
+                settings, providers, _generation, _source_generation, _sessions = self._state()
                 signature = self._model_signature(settings)
 
                 # Scheduling/view changes do not rebuild the detector or reset
@@ -689,7 +689,11 @@ class FleetPersonDetectionController(QObject):
                         last_received_monotonic.pop(camera_id, None)
                         next_at.pop(camera_id, None)
                         due_at = 0.0
-                    if packet.sequence == last_sequences.get(camera_id):
+                    if (
+                        packet.sequence == last_sequences.get(camera_id)
+                        and packet.received_monotonic
+                        == last_received_monotonic.get(camera_id)
+                    ):
                         continue
                     due.append((camera_id, provider, packet, session, due_at))
 
