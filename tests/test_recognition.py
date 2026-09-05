@@ -14,6 +14,7 @@ from app.face import (
     TrackRecognitionConfirmer,
 )
 from app.inference import PersonDetection
+from app.metrics import CameraMetrics
 from app.tracking import CameraState, CameraTrackingPipeline, IoUGreedyTracker
 
 
@@ -117,6 +118,34 @@ def test_matcher_rejects_incompatible_embedding_model(tmp_path) -> None:
 
     with pytest.raises(IncompatibleEmbeddingModelError, match="incompatible"):
         FaceMatcher(second, store, threshold=0.8)
+
+
+def test_shared_matcher_attributes_metrics_to_each_request_camera(tmp_path) -> None:
+    embedder = FakeEmbedder(
+        embedding_dimension=3,
+        model_id="face-model",
+        callback=lambda image: [1, 0, 0],
+    )
+    store = PersonStore(tmp_path / "persons")
+    save_person(store, embedder, "Mario Rossi", [1, 0, 0])
+    matcher = FaceMatcher(embedder, store, threshold=0.8, metrics=None)
+    camera_one = CameraMetrics("camera-1")
+    camera_two = CameraMetrics("camera-2")
+    image = np.zeros((32, 32, 3), dtype=np.uint8)
+
+    matcher.match(image, metrics=camera_one)
+    matcher.match(image, metrics=camera_two)
+
+    first = camera_one.snapshot()
+    second = camera_two.snapshot()
+    for snapshot in (first, second):
+        assert snapshot.recognition_attempts == 1
+        assert snapshot.embeddings_generated == 1
+        assert snapshot.embedding_calls == 1
+        assert snapshot.matching_calls == 1
+        assert snapshot.known_recognitions == 1
+    assert first.camera_id == "camera-1"
+    assert second.camera_id == "camera-2"
 
 
 def test_confirmation_requires_minimum_coherent_observations() -> None:
@@ -260,6 +289,7 @@ def test_two_camera_pipelines_keep_confirmation_state_independent() -> None:
 
     assert camera_one.state is CameraState.KNOWN
     assert camera_two.state is CameraState.FACE_ANALYSIS
+
 
 def test_matcher_normalizes_gallery_only_during_refresh(tmp_path, monkeypatch) -> None:
     import app.face.matcher as matcher_module
