@@ -110,7 +110,10 @@ class FaceAnalysisService:
     def _match(self, image: np.ndarray) -> RecognitionResult:
         if self.matcher is None:
             raise RuntimeError("face matcher is not configured")
-        return self.matcher.match(image)
+        # The matcher/gallery/embedder may be shared by the entire fleet.  Pass
+        # this service's metrics as request-scoped context so accounting stays
+        # per-camera without mutating shared matcher state.
+        return self.matcher.match(image, metrics=self.metrics)
 
     @staticmethod
     def _face_belongs_to_track(
