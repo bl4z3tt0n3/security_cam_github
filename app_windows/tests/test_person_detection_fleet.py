@@ -63,7 +63,7 @@ class BatchDetector(PersonDetector):
         return 2
 
     def detect(self, frame: np.ndarray, timestamp=None):
-        raise AssertionError("fleet should batch two due cameras")
+        return self.detect_batch([frame], [timestamp])[0]
 
     def detect_batch(self, frames, timestamps=None):
         self.batch_sizes.append(len(frames))
@@ -75,7 +75,7 @@ class BatchDetector(PersonDetector):
                 PersonDetection(
                     bbox=(0.0, 0.0, 4.0, 4.0),
                     confidence=0.9,
-                    timestamp=stamp,
+                    timestamp=stamp or datetime.now(timezone.utc),
                 )
             ]
             for stamp in stamps
