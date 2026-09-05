@@ -185,7 +185,15 @@ class PersonDetectionSettings:
 
 @dataclass(frozen=True)
 class PersonDetectionSnapshot:
-    """Point-in-time result and telemetry for the selected camera."""
+    """Point-in-time result and telemetry for the selected camera.
+
+    ``latency_ms`` and ``batch_duration_ms`` represent wall-clock response
+    latency. ``amortized_cost_ms`` is the batch cost divided by its inputs and
+    is kept separate because it is a throughput metric, not user-visible
+    response latency. ``scheduler_wait_ms`` is the delay after the target due
+    time, while ``frame_age_ms`` measures local frame age when the result is
+    published.
+    """
 
     camera_id: str | None = None
     status: PersonDetectionStatus = PersonDetectionStatus.DISABLED
@@ -200,6 +208,10 @@ class PersonDetectionSnapshot:
     precision: str | None = None
     inference_fps: float | None = None
     latency_ms: float | None = None
+    batch_duration_ms: float | None = None
+    amortized_cost_ms: float | None = None
+    scheduler_wait_ms: float | None = None
+    frame_age_ms: float | None = None
     person_count: int = 0
     detection_count: int = 0
     detections: tuple[PersonDetection, ...] = ()
