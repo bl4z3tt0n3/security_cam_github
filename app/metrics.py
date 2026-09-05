@@ -3,14 +3,22 @@
 The video worker and sampler already expose acquisition snapshots.  This module
 keeps the inference-side counters in a small reusable contract and can ingest
 those snapshots without coupling the metrics layer to a concrete worker class.
+Host telemetry is optional: CPU/RAM use psutil, NVIDIA uses nvidia-smi when
+present, and Windows integrated/discrete GPUs use native GPU Performance
+Counter CIM classes through PowerShell.  Shared GPU memory is deliberately
+reported separately from system RAM and dedicated VRAM so it is never added to
+RAM usage a second time.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import math
+import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from typing import Any, Callable, Literal
@@ -531,7 +539,13 @@ GpuStatus = Literal["available", "unavailable"]
 
 @dataclass(frozen=True)
 class ResourceSnapshot:
-    """Global host-resource sample; GPU fields are optional by design."""
+    """Global host-resource sample with explicit shared-memory semantics.
+
+    ``ram_used_bytes`` is the operating system's system-RAM view.  Integrated
+    GPU ``gpu_shared_used_bytes`` is a separate attribution signal and must not
+    be added to RAM usage.  ``None`` means the metric is unavailable; it never
+    means zero.
+    """
 
     cpu_percent: float | None
     ram_used_bytes: int | None
@@ -542,36 +556,59 @@ class ResourceSnapshot:
     vram_used_bytes: int | None
     vram_total_bytes: int | None
     gpu_detail: str
+    process_rss_bytes: int | None = None
+    ram_available_bytes: int | None = None
+    gpu_name: str | None = None
+    gpu_shared_used_bytes: int | None = None
+    gpu_dedicated_used_bytes: int | None = None
+    gpu_metric_source: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "cpu_percent": self.cpu_percent,
             "ram_used_bytes": self.ram_used_bytes,
             "ram_total_bytes": self.ram_total_bytes,
+            "ram_available_bytes": self.ram_available_bytes,
             "ram_percent": self.ram_percent,
+            "process_rss_bytes": self.process_rss_bytes,
             "gpu_status": self.gpu_status,
             "gpu_percent": self.gpu_percent,
+            "gpu_name": self.gpu_name,
             "vram_used_bytes": self.vram_used_bytes,
             "vram_total_bytes": self.vram_total_bytes,
+            "gpu_shared_used_bytes": self.gpu_shared_used_bytes,
+            "gpu_dedicated_used_bytes": self.gpu_dedicated_used_bytes,
+            "gpu_metric_source": self.gpu_metric_source,
             "gpu_detail": self.gpu_detail,
         }
+
+
+@dataclass(frozen=True)
+class _GpuSample:
+    status: GpuStatus
+    percent: float | None = None
+    vram_used_bytes: int | None = None
+    vram_total_bytes: int | None = None
+    detail: str = "GPU metrics unavailable"
+    name: str | None = None
+    shared_used_bytes: int | None = None
+    dedicated_used_bytes: int | None = None
+    source: str | None = None
 
 
 _GPU_CACHE_TTL_S = 1.0
 _GPU_CACHE_LOCK = threading.Lock()
 _gpu_cache_executable: str | None = None
 _gpu_cache_at = 0.0
-_gpu_cache_value: tuple[GpuStatus, float | None, int | None, int | None, str] | None = None
+_gpu_cache_value: _GpuSample | None = None
 
 
-def _read_gpu_uncached(
-    executable: str,
-) -> tuple[GpuStatus, float | None, int | None, int | None, str]:
+def _read_nvidia_gpu_uncached(executable: str) -> _GpuSample:
     try:
         result = subprocess.run(
             [
                 executable,
-                "--query-gpu=utilization.gpu,memory.used,memory.total",
+                "--query-gpu=name,utilization.gpu,memory.used,memory.total",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -580,58 +617,207 @@ def _read_gpu_uncached(
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return "unavailable", None, None, None, f"nvidia-smi unavailable: {type(exc).__name__}"
+        return _GpuSample(
+            "unavailable",
+            detail=f"nvidia-smi unavailable: {type(exc).__name__}",
+            source="nvidia-smi",
+        )
     if result.returncode != 0:
-        return "unavailable", None, None, None, "nvidia-smi returned an error"
+        return _GpuSample(
+            "unavailable",
+            detail="nvidia-smi returned an error",
+            source="nvidia-smi",
+        )
     line = next((item.strip() for item in result.stdout.splitlines() if item.strip()), "")
     fields = [item.strip() for item in line.split(",")]
-    if len(fields) < 3:
-        return "unavailable", None, None, None, "GPU metrics were not reported"
+    if len(fields) < 4:
+        return _GpuSample(
+            "unavailable",
+            detail="GPU metrics were not reported",
+            source="nvidia-smi",
+        )
     try:
-        gpu_percent = _finite_non_negative(float(fields[0]), label="gpu_percent")
-        used_mib = _finite_non_negative(float(fields[1]), label="vram_used_mib")
-        total_mib = _finite_non_negative(float(fields[2]), label="vram_total_mib")
+        gpu_percent = _finite_non_negative(float(fields[-3]), label="gpu_percent")
+        used_mib = _finite_non_negative(float(fields[-2]), label="vram_used_mib")
+        total_mib = _finite_non_negative(float(fields[-1]), label="vram_total_mib")
     except ValueError:
-        return "unavailable", None, None, None, "GPU metrics contained non-numeric values"
-    return (
+        return _GpuSample(
+            "unavailable",
+            detail="GPU metrics contained non-numeric values",
+            source="nvidia-smi",
+        )
+    gpu_name = ",".join(fields[:-3]).strip() or None
+    used_bytes = int(round(used_mib * 1024 * 1024))
+    return _GpuSample(
         "available",
-        gpu_percent,
-        int(round(used_mib * 1024 * 1024)),
-        int(round(total_mib * 1024 * 1024)),
-        "nvidia-smi",
+        percent=min(100.0, gpu_percent),
+        vram_used_bytes=used_bytes,
+        vram_total_bytes=int(round(total_mib * 1024 * 1024)),
+        detail="nvidia-smi: device utilization and dedicated VRAM",
+        name=gpu_name,
+        dedicated_used_bytes=used_bytes,
+        source="nvidia-smi",
     )
 
 
-def _read_gpu() -> tuple[GpuStatus, float | None, int | None, int | None, str]:
-    """Read nvidia-smi with a short TTL so UI polling does not spawn a process per tick."""
+def _optional_counter_number(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(parsed) or parsed < 0:
+        return None
+    return parsed
 
-    executable = shutil.which("nvidia-smi")
-    if executable is None:
-        return "unavailable", None, None, None, "nvidia-smi not found"
 
+def _read_windows_gpu_uncached(executable: str) -> _GpuSample:
+    """Read process GPU counters available on Windows 10/11, including Iris Xe.
+
+    The process' busiest GPU engine is used for utilization instead of summing
+    engines, which could exceed 100%.  Shared and dedicated allocations are
+    exposed independently.  These are Performance Counter values, not a DXGI
+    reservation or a promise that memory is physically dedicated.
+    """
+
+    target_pid = os.getpid()
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$targetPid = {target_pid}
+$gpuName = (Get-CimInstance Win32_VideoController | Select-Object -First 1 -ExpandProperty Name)
+$engines = @(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | Where-Object {{ $_.Name -match \"pid_${{targetPid}}_\" }})
+$engineMax = ($engines | Measure-Object -Property UtilizationPercentage -Maximum).Maximum
+$mem = @(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory | Where-Object {{ $_.Name -match \"pid_${{targetPid}}_\" }})
+$shared = ($mem | Measure-Object -Property SharedUsage -Sum).Sum
+$dedicated = ($mem | Measure-Object -Property DedicatedUsage -Sum).Sum
+[pscustomobject]@{{gpu_name=$gpuName; gpu_percent=$engineMax; shared_bytes=$shared; dedicated_bytes=$dedicated}} | ConvertTo-Json -Compress
+""".strip()
+    try:
+        result = subprocess.run(
+            [executable, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return _GpuSample(
+            "unavailable",
+            detail=f"Windows GPU Performance Counters unavailable: {type(exc).__name__}",
+            source="windows-gpu-performance-counters",
+        )
+    if result.returncode != 0:
+        return _GpuSample(
+            "unavailable",
+            detail="Windows GPU Performance Counters returned an error",
+            source="windows-gpu-performance-counters",
+        )
+    line = next((item.strip() for item in result.stdout.splitlines() if item.strip()), "")
+    try:
+        payload = json.loads(line)
+    except (json.JSONDecodeError, TypeError):
+        return _GpuSample(
+            "unavailable",
+            detail="Windows GPU Performance Counters returned invalid JSON",
+            source="windows-gpu-performance-counters",
+        )
+    if not isinstance(payload, dict):
+        return _GpuSample(
+            "unavailable",
+            detail="Windows GPU Performance Counters returned an invalid payload",
+            source="windows-gpu-performance-counters",
+        )
+    name_value = payload.get("gpu_name")
+    gpu_name = str(name_value).strip() if name_value is not None else ""
+    if not gpu_name:
+        return _GpuSample(
+            "unavailable",
+            detail="Windows did not report a GPU device",
+            source="windows-gpu-performance-counters",
+        )
+    percent = _optional_counter_number(payload.get("gpu_percent"))
+    shared = _optional_counter_number(payload.get("shared_bytes"))
+    dedicated = _optional_counter_number(payload.get("dedicated_bytes"))
+    percent_value = min(100.0, percent) if percent is not None else None
+    shared_bytes = int(round(shared)) if shared is not None else None
+    dedicated_bytes = int(round(dedicated)) if dedicated is not None else None
+    return _GpuSample(
+        "available",
+        percent=percent_value,
+        # Dedicated allocation is exposed through the historical VRAM-used
+        # field for compatibility. Total VRAM is intentionally unknown for an
+        # iGPU because shared system memory is dynamically managed by Windows.
+        vram_used_bytes=dedicated_bytes,
+        vram_total_bytes=None,
+        detail=(
+            "Windows GPU Performance Counters: process max-engine utilization; "
+            "shared/dedicated allocations are reported separately"
+        ),
+        name=gpu_name,
+        shared_used_bytes=shared_bytes,
+        dedicated_used_bytes=dedicated_bytes,
+        source="windows-gpu-performance-counters",
+    )
+
+
+def _cached_gpu_sample(cache_key: str, loader: Callable[[], _GpuSample]) -> _GpuSample:
     global _gpu_cache_executable, _gpu_cache_at, _gpu_cache_value
     now = time.monotonic()
     with _GPU_CACHE_LOCK:
         if (
             _gpu_cache_value is not None
-            and _gpu_cache_executable == executable
+            and _gpu_cache_executable == cache_key
             and now - _gpu_cache_at <= _GPU_CACHE_TTL_S
         ):
             return _gpu_cache_value
-        value = _read_gpu_uncached(executable)
-        _gpu_cache_executable = executable
-        _gpu_cache_at = now
+    # Do not hold the cache lock while spawning an external telemetry process.
+    value = loader()
+    with _GPU_CACHE_LOCK:
+        _gpu_cache_executable = cache_key
+        _gpu_cache_at = time.monotonic()
         _gpu_cache_value = value
-        return value
+    return value
+
+
+def _read_gpu() -> _GpuSample:
+    """Read optional GPU telemetry with a short TTL and Intel/Windows fallback."""
+
+    nvidia = shutil.which("nvidia-smi")
+    if nvidia is not None:
+        value = _cached_gpu_sample(
+            f"nvidia:{nvidia}",
+            lambda: _read_nvidia_gpu_uncached(nvidia),
+        )
+        if value.status == "available" or sys.platform != "win32":
+            return value
+
+    if sys.platform == "win32":
+        powershell = shutil.which("powershell") or shutil.which("pwsh")
+        if powershell is not None:
+            return _cached_gpu_sample(
+                f"windows:{powershell}",
+                lambda: _read_windows_gpu_uncached(powershell),
+            )
+        detail = "nvidia-smi and PowerShell not found"
+        return _GpuSample("unavailable", detail=detail)
+
+    return _GpuSample("unavailable", detail="nvidia-smi not found")
 
 
 def read_resource_snapshot() -> ResourceSnapshot:
-    """Read CPU/RAM and optional GPU/VRAM without making GPU a requirement."""
+    """Read host/process CPU/RAM and optional GPU metrics.
+
+    Collection is best-effort and bounded.  Missing counters remain ``None``;
+    callers must not interpret missing integrated-GPU telemetry as zero load.
+    """
 
     cpu_percent: float | None = None
     ram_used_bytes: int | None = None
     ram_total_bytes: int | None = None
+    ram_available_bytes: int | None = None
     ram_percent: float | None = None
+    process_rss_bytes: int | None = None
     try:
         import psutil
 
@@ -639,21 +825,32 @@ def read_resource_snapshot() -> ResourceSnapshot:
         memory = psutil.virtual_memory()
         ram_used_bytes = int(memory.used)
         ram_total_bytes = int(memory.total)
+        ram_available_bytes = int(memory.available)
         ram_percent = _finite_non_negative(memory.percent, label="ram_percent")
+        try:
+            process_rss_bytes = int(psutil.Process(os.getpid()).memory_info().rss)
+        except (psutil.Error, OSError, ValueError, AttributeError):
+            process_rss_bytes = None
     except (ImportError, OSError, ValueError, AttributeError):
         pass
 
-    gpu_status, gpu_percent, vram_used, vram_total, gpu_detail = _read_gpu()
+    gpu = _read_gpu()
     return ResourceSnapshot(
         cpu_percent=cpu_percent,
         ram_used_bytes=ram_used_bytes,
         ram_total_bytes=ram_total_bytes,
         ram_percent=ram_percent,
-        gpu_status=gpu_status,
-        gpu_percent=gpu_percent,
-        vram_used_bytes=vram_used,
-        vram_total_bytes=vram_total,
-        gpu_detail=gpu_detail,
+        process_rss_bytes=process_rss_bytes,
+        ram_available_bytes=ram_available_bytes,
+        gpu_status=gpu.status,
+        gpu_percent=gpu.percent,
+        gpu_name=gpu.name,
+        vram_used_bytes=gpu.vram_used_bytes,
+        vram_total_bytes=gpu.vram_total_bytes,
+        gpu_shared_used_bytes=gpu.shared_used_bytes,
+        gpu_dedicated_used_bytes=gpu.dedicated_used_bytes,
+        gpu_metric_source=gpu.source,
+        gpu_detail=gpu.detail,
     )
 
 
