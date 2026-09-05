@@ -154,11 +154,23 @@ class FaceMatcher:
         self._gallery_snapshot = (matrix, tuple(owners))
         return records
 
-    def match(self, face_image: np.ndarray) -> RecognitionResult:
-        """Return a thresholded result without assigning names to unknown faces."""
+    def match(
+        self,
+        face_image: np.ndarray,
+        *,
+        metrics: CameraMetrics | None = None,
+    ) -> RecognitionResult:
+        """Return a thresholded result without assigning names to unknown faces.
 
-        if self.metrics is not None:
-            self.metrics.record_recognition_attempt()
+        ``metrics`` is a request-scoped sink.  It lets multiple camera services
+        share this matcher/embedder/gallery without mutating global matcher
+        state or losing per-camera attribution.  When omitted, the constructor
+        sink is retained for backwards-compatible single-camera callers.
+        """
+
+        metric_sink = metrics if metrics is not None else self.metrics
+        if metric_sink is not None:
+            metric_sink.record_recognition_attempt()
         # The fake embedder intentionally has no model identity.  Keeping the
         # optional metadata empty preserves the small public contract used by
         # existing offline callers while concrete runtime embedders always
@@ -190,11 +202,11 @@ class FaceMatcher:
                 self.embedder.metadata.embedding_dimension,
                 label="query embedding",
             )
-            if self.metrics is not None:
-                self.metrics.record_embedding_generated()
+            if metric_sink is not None:
+                metric_sink.record_embedding_generated()
         finally:
-            if self.metrics is not None:
-                self.metrics.record_embedding(
+            if metric_sink is not None:
+                metric_sink.record_embedding(
                     (time.perf_counter() - embedding_started) * 1000.0
                 )
 
@@ -225,8 +237,8 @@ class FaceMatcher:
                     requested_device=requested_device,
                     actual_device=actual_device,
                 )
-                if self.metrics is not None:
-                    self.metrics.record_recognition_result("known")
+                if metric_sink is not None:
+                    metric_sink.record_recognition_result("known")
                 return result
             result = RecognitionResult(
                 status="unknown",
@@ -238,11 +250,11 @@ class FaceMatcher:
                 requested_device=requested_device,
                 actual_device=actual_device,
             )
-            if self.metrics is not None:
-                self.metrics.record_recognition_result("unknown")
+            if metric_sink is not None:
+                metric_sink.record_recognition_result("unknown")
             return result
         finally:
-            if self.metrics is not None:
-                self.metrics.record_matching(
+            if metric_sink is not None:
+                metric_sink.record_matching(
                     (time.perf_counter() - matching_started) * 1000.0
                 )
