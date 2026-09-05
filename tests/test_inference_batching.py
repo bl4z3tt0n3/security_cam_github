@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import threading
+import time
 
 import numpy as np
+import pytest
 
 from app.inference import BatchingPersonDetector, PersonDetection, PersonDetector
 
@@ -11,6 +13,7 @@ from app.inference import BatchingPersonDetector, PersonDetection, PersonDetecto
 class BatchCapableDetector(PersonDetector):
     def __init__(self) -> None:
         self.batch_sizes: list[int] = []
+        self.closed = False
 
     @property
     def supports_batch_inference(self) -> bool:
@@ -42,6 +45,31 @@ class BatchCapableDetector(PersonDetector):
             for stamp in stamps
         ]
 
+    def close(self) -> None:
+        self.closed = True
+
+
+class BlockingBatchDetector(BatchCapableDetector):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.close_calls = 0
+
+    def detect_batch(
+        self,
+        frames: list[np.ndarray],
+        timestamps: list[datetime | None] | None = None,
+    ) -> list[list[PersonDetection]]:
+        self.started.set()
+        if not self.release.wait(timeout=2.0):
+            raise TimeoutError("test did not release backend")
+        return super().detect_batch(frames, timestamps)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        super().close()
+
 
 def test_batching_detector_groups_concurrent_camera_requests() -> None:
     backend = BatchCapableDetector()
@@ -72,3 +100,45 @@ def test_batching_detector_groups_concurrent_camera_requests() -> None:
         assert all(len(result) == 1 for result in results)
     finally:
         detector.close()
+
+
+def test_batching_detector_shutdown_releases_accepted_work_without_closing_in_use_backend() -> None:
+    backend = BlockingBatchDetector()
+    detector = BatchingPersonDetector(
+        backend,
+        max_batch_size=2,
+        batch_window_ms=0,
+    )
+    result: list[list[PersonDetection]] = []
+    errors: list[BaseException] = []
+
+    def call_detect() -> None:
+        try:
+            result.append(detector.detect(np.zeros((8, 8, 3), dtype=np.uint8)))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    caller = threading.Thread(target=call_detect)
+    closer = threading.Thread(target=detector.close)
+    caller.start()
+    assert backend.started.wait(timeout=1.0)
+
+    closer.start()
+    time.sleep(0.05)
+    assert backend.closed is False
+    with pytest.raises(RuntimeError, match="closing or closed"):
+        detector.detect(np.ones((8, 8, 3), dtype=np.uint8))
+
+    backend.release.set()
+    caller.join(timeout=1.0)
+    closer.join(timeout=1.0)
+    assert not caller.is_alive()
+    assert not closer.is_alive()
+    assert errors == []
+    assert len(result) == 1
+    assert backend.closed is True
+    assert backend.close_calls == 1
+
+    # Repeated shutdown is idempotent and cannot double-close the backend.
+    detector.close()
+    assert backend.close_calls == 1
